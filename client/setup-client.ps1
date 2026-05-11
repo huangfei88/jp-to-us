@@ -173,8 +173,9 @@ $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
 if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force | Out-Null }
 Set-ItemProperty -Path $policyPath -Name "DisableSmartNameResolution" -Value 1 -Type DWord -Force
 
-# 4-e. 等待 WireGuard 适配器就绪（Windows Server 2022 上驱动注册可能有 5–15 秒延迟）
+# 4-e. 等待 WireGuard 适配器就绪（Windows Server 2022 上驱动注册可能需要最多 30 秒）
 # Kill Switch 规则的 -InterfaceAlias 需要适配器处于 Up 状态才能正确绑定
+# 最多等待 30 秒（15 次 × 2 秒）
 Write-Info "等待 WireGuard 网卡就绪..."
 $wgAdapter = $null
 for ($i = 0; $i -lt 15; $i++) {
