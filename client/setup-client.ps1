@@ -190,7 +190,7 @@ $serverEndpointIP   = if ($epMatch.Success) {
                 Select-Object -ExpandProperty IPAddressToString -First 1
             if ($resolved) { $resolved } else { $raw }
         } catch {
-            Write-Warn "无法解析 Endpoint 主机名 '$raw' 为 IP 地址，Kill Switch 规则将使用主机名（Windows 防火墙不支持主机名，规则可能无效）。建议将配置文件中 Endpoint 改为 IP 地址。"
+            Write-Warn "无法解析 Endpoint 主机名 '$raw' 为 IP 地址。Windows 防火墙不支持主机名作为 RemoteAddress，Kill Switch 将无法正确阻止 VPN 断线时的流量，真实 IP 可能泄露。请将配置文件中 Endpoint 改为 IP 地址后重新运行安装脚本。"
             $raw
         }
     }
