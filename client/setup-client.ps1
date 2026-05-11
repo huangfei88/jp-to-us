@@ -135,9 +135,13 @@ Write-Info "隧道服务运行中 ✓"
 # ═════════════════════════════════════════════════════════════════════════════
 
 # 4-a. 禁用其他网卡的 IPv6（防止 IPv6 绕过隧道）
-# 注意：使用隧道名称精确匹配，避免误禁 WireGuard 隧道适配器本身
+# 注意：同时排除名称含隧道名和描述含 WireGuard 的适配器，避免误禁隧道接口本身
 Write-Info "禁用非 WireGuard 网卡的 IPv6..."
-Get-NetAdapter | Where-Object { $_.Name -ne $WG_TUNNEL_NAME -and $_.Status -eq "Up" } | ForEach-Object {
+Get-NetAdapter | Where-Object {
+    $_.Name -notlike "*$WG_TUNNEL_NAME*" -and
+    $_.InterfaceDescription -notlike "*WireGuard*" -and
+    $_.Status -eq "Up"
+} | ForEach-Object {
     Disable-NetAdapterBinding -Name $_.Name -ComponentID "ms_tcpip6" -ErrorAction SilentlyContinue
     Write-Warn "  已禁用 $($_.Name) 的 IPv6"
 }
@@ -185,7 +189,10 @@ $serverEndpointIP   = if ($epMatch.Success) {
                 Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
                 Select-Object -ExpandProperty IPAddressToString -First 1
             if ($resolved) { $resolved } else { $raw }
-        } catch { $raw }
+        } catch {
+            Write-Warn "无法解析 Endpoint 主机名 '$raw' 为 IP 地址，Kill Switch 规则将使用主机名（Windows 防火墙不支持主机名，规则可能无效）。建议将配置文件中 Endpoint 改为 IP 地址。"
+            $raw
+        }
     }
 } else { $null }
 $serverEndpointPort = if ($epMatch.Success) { [int]$epMatch.Groups[2].Value }    else { 51820 }

@@ -204,7 +204,12 @@ systemctl enable  "wg-quick@${WG_IFACE}"
 systemctl restart "wg-quick@${WG_IFACE}"
 
 # ── 7. 生成客户端配置文件 ──────────────────────────────────────────────────────
-SERVER_PUBLIC_IP=$(curl -s4 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+SERVER_PUBLIC_IP=$(curl -s4 --max-time 10 https://api.ipify.org 2>/dev/null)
+if [[ -z "$SERVER_PUBLIC_IP" ]]; then
+    warn "无法从 api.ipify.org 获取公网 IP，将使用本机 IP 作为 Endpoint"
+    warn "请手动核对客户端配置文件中的 Endpoint 地址是否正确"
+    SERVER_PUBLIC_IP=$(hostname -I | awk '{print $1}')
+fi
 CLIENT_CONF="/etc/wireguard/client-wg0.conf"
 
 info "生成客户端配置 ${CLIENT_CONF}..."
