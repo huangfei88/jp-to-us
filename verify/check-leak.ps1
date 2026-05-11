@@ -41,7 +41,7 @@ if ($null -ne $svc -and $svc.Status -eq "Running") {
 Write-Info "检查 WireGuard 网卡..."
 $wgAdapter = Get-NetAdapter | Where-Object {
     $_.Name -like "*$TUNNEL_NAME*" -or $_.InterfaceDescription -like "*WireGuard*"
-}
+} | Select-Object -First 1
 if ($wgAdapter -and $wgAdapter.Status -eq "Up") {
     Write-Pass "WireGuard 网卡正常：$($wgAdapter.Name)"
 } else {

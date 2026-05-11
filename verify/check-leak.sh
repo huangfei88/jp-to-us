@@ -68,11 +68,18 @@ else
 fi
 
 # ── 6. FORWARD 规则 ────────────────────────────────────────────────────────────
-info "检查 FORWARD 规则..."
+info "检查 IPv4 FORWARD 规则..."
 if iptables -L FORWARD -n -v 2>/dev/null | grep -q "${WG_IFACE}"; then
-    pass "FORWARD 链规则存在"
+    pass "IPv4 FORWARD 链规则存在"
 else
-    fail "FORWARD 链未找到 ${WG_IFACE} 相关规则"
+    fail "IPv4 FORWARD 链未找到 ${WG_IFACE} 相关规则"
+fi
+
+info "检查 IPv6 FORWARD 规则..."
+if ip6tables -L FORWARD -n -v 2>/dev/null | grep -q "${WG_IFACE}"; then
+    pass "IPv6 FORWARD 链规则存在（::/0 隧道流量可正常转发）"
+else
+    fail "IPv6 FORWARD 链未找到 ${WG_IFACE} 相关规则（客户端 IPv6 流量可能被静默丢弃）"
 fi
 
 # ── 7. BBR 拥塞控制 ────────────────────────────────────────────────────────────
@@ -96,7 +103,18 @@ SR=$(sysctl -n net.ipv4.conf.all.send_redirects 2>/dev/null || echo 1)
 [[ "$SR" == "0" ]] && pass "ICMP 重定向发送已禁用（路由表安全）" \
                    || fail "ICMP 重定向发送未禁用（可能干扰客户端路由）"
 
-# ── 10. 服务端公网 IP ─────────────────────────────────────────────────────────
+# ── 10. TCP Keepalive ──────────────────────────────────────────────────────────
+info "检查 TCP Keepalive 参数..."
+KA_TIME=$(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null || echo 7200)
+KA_INTVL=$(sysctl -n net.ipv4.tcp_keepalive_intvl 2>/dev/null || echo 75)
+KA_PROBES=$(sysctl -n net.ipv4.tcp_keepalive_probes 2>/dev/null || echo 9)
+if [[ "$KA_TIME" -le 300 && "$KA_INTVL" -le 30 && "$KA_PROBES" -le 5 ]]; then
+    pass "TCP Keepalive 已调优（time=${KA_TIME}s intvl=${KA_INTVL}s probes=${KA_PROBES}）"
+else
+    fail "TCP Keepalive 未调优（time=${KA_TIME} intvl=${KA_INTVL} probes=${KA_PROBES}）——僵尸连接最多占用 $((KA_TIME + KA_INTVL * KA_PROBES))s"
+fi
+
+# ── 11. 服务端公网 IP ─────────────────────────────────────────────────────────
 info "检查服务端出口 IP..."
 # 并行获取 IPv4/IPv6（各自最多等 5 秒），减少总等待时间
 _TMP4=""; _TMP6=""
@@ -111,7 +129,7 @@ rm -f "$_TMP4" "$_TMP6"
 echo -e "  服务端 IPv4：${CYAN}${PUB_IP4}${NC}"
 echo -e "  服务端 IPv6：${CYAN}${PUB_IP6}${NC}"
 
-# ── 11. WireGuard peer 状态 ───────────────────────────────────────────────────
+# ── 12. WireGuard peer 状态 ───────────────────────────────────────────────────
 info "WireGuard 连接状态："
 wg show "$WG_IFACE" 2>/dev/null || fail "无法读取 wg show 输出"
 

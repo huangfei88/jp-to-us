@@ -72,6 +72,10 @@ net.ipv4.ip_local_port_range = 10000 65535
 net.ipv4.tcp_mtu_probing = 1
 # socket 选项内存上限（配合大缓冲区使用）
 net.core.optmem_max = 65536
+# TCP Keepalive：加速检测死连接，避免NAT表和conntrack资源被僵尸连接占用
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
 
 # ── 路由安全 / 防 ICMP 劫持 ──
 net.ipv4.conf.all.rp_filter = 1
@@ -79,9 +83,11 @@ net.ipv4.conf.default.rp_filter = 1
 # 作为 NAT/转发服务器禁止发送 ICMP 重定向，防止干扰客户端路由表
 net.ipv4.conf.all.send_redirects = 0
 net.ipv4.conf.default.send_redirects = 0
-# 不接受 ICMP 重定向，防止路由被劫持
+# 不接受 ICMP 重定向，防止路由被劫持（all + default 覆盖动态新建接口如 wg0）
 net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
 net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
 SYSCTL
 sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
 
@@ -92,7 +98,7 @@ else
     warn "BBR 模块不可用（内核版本可能过低），降级为 cubic"
     sed -i 's/net.ipv4.tcp_congestion_control = bbr/net.ipv4.tcp_congestion_control = cubic/' \
         /etc/sysctl.d/99-vpn-perf.conf
-    sed -i 's/net.core.default_qdisc = fq/net.core.default_qdisc = pfifo_fast/' \
+    sed -i 's/net.core.default_qdisc = fq/net.core.default_qdisc = fq_codel/' \
         /etc/sysctl.d/99-vpn-perf.conf
     sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
 fi
@@ -148,14 +154,22 @@ PostDown = iptables  -t nat -D POSTROUTING -s ${WG_SUBNET_V4} -o ${PUB_IF} -j MA
 PostDown = ip6tables -t nat -D POSTROUTING -s ${WG_SUBNET_V6} -o ${PUB_IF} -j MASQUERADE
 
 # ── 转发规则（入→出 / 出→入） ─────────────────────────────
-PostUp   = iptables -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
-PostUp   = iptables -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostDown = iptables -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
-PostDown = iptables -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp   = iptables  -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
+PostUp   = iptables  -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostDown = iptables  -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
+PostDown = iptables  -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# ── IPv6 转发规则（与 IPv4 对称，保证 ::/0 客户端流量正常转发）──
+PostUp   = ip6tables -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
+PostUp   = ip6tables -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostDown = ip6tables -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
+PostDown = ip6tables -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
 # ── MSS 钳制：防止跨 MTU 边界导致 TCP 连接卡住（企业级必须）──
-PostUp   = iptables -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = iptables -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = iptables  -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables  -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ip6tables -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip6tables -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # ── MTU：避免分片，适合日本到美国的太平洋链路 ────────────────
 MTU = 1420
