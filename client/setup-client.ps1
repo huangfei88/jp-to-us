@@ -220,11 +220,11 @@ if ($serverEndpointIP) {
         -Profile Any -Enabled True | Out-Null
 }
 
-# 允许本地回环（127.0.0.0/8）
+# 允许本地回环（IPv4 127.0.0.0/8 + IPv6 ::1/128）
 New-NetFirewallRule -Name "WG-KS-AllowLoopback" `
     -DisplayName "WireGuard KS: Allow Loopback" `
     -Direction Outbound -Action Allow `
-    -RemoteAddress "127.0.0.0/8" -Profile Any -Enabled True | Out-Null
+    -RemoteAddress @("127.0.0.0/8", "::1/128") -Profile Any -Enabled True | Out-Null
 
 Write-Info "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断）"
 

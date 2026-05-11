@@ -139,7 +139,7 @@ bash verify/check-leak.sh
 | TCP 发送/接收缓冲 | 64 MB | 满足高带宽延迟积（BDP）需求 |
 | MTU | 1420 | WireGuard 推荐值，避免分片 |
 | PersistentKeepalive | 25 秒 | 穿越 NAT，保持连接稳定 |
-| qdisc | fq | 配合 BBR 使用，公平队列 |
+| qdisc | fq（BBR）/ fq_codel（降级） | 配合 BBR 使用公平队列；BBR 不可用时自动降级为 fq_codel（含 AQM，减少 bufferbloat）|
 
 ---
 

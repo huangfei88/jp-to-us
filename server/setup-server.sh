@@ -89,10 +89,13 @@ net.ipv4.conf.default.accept_redirects = 0
 net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
 SYSCTL
+# 预加载 BBR 模块（如果可用）——必须在 sysctl -p 之前，否则在以模块形式编译 BBR 的内核上
+# sysctl -p 对 tcp_congestion_control = bbr 报 "Invalid argument"，set -e 会中断整个脚本
+modprobe tcp_bbr 2>/dev/null || true
 sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
 
-# 检查 BBR 模块是否可用（旧内核可能不支持）
-if modprobe tcp_bbr 2>/dev/null && sysctl -n net.ipv4.tcp_congestion_control | grep -q bbr; then
+# 检查 BBR 是否真正生效
+if sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
     info "BBR 拥塞控制已加载 ✓"
 else
     warn "BBR 模块不可用（内核版本可能过低），降级为 cubic"
