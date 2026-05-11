@@ -258,7 +258,7 @@ if command -v ufw &>/dev/null; then
     info "检查 UFW 状态（Debian 专项）..."
     if ufw status 2>/dev/null | grep -q "Status: active"; then
         pass "UFW 已激活"
-        if ufw status 2>/dev/null | grep -qE "${WG_PORT}/(udp|UDP)"; then
+        if ufw status 2>/dev/null | grep -qiE "${WG_PORT}/udp"; then
             pass "UFW 已开放 WireGuard 端口 ${WG_PORT}/udp"
         else
             fail "UFW 未开放 WireGuard 端口 ${WG_PORT}/udp（握手包将被丢弃，隧道无法建立）"
