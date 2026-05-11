@@ -73,7 +73,7 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.ip_local_port_range = 10000 65535
 # TCP MTU 探测：防止跨太平洋链路上 PMTUD 黑洞导致 TCP 连接卡死（企业级必须）
 net.ipv4.tcp_mtu_probing = 1
-# socket 选项内存上限：辅助数据（ancillary data / cmsg）的每套接字内存上限。
+# socket 选项内存上限：辅助数据（ancillary data / cmsg）的每个套接字内存上限。
 # 512 KB（524288 B）确保大缓冲区场景下 IP_PKTINFO、SO_TIMESTAMPING 等辅助选项
 # 不会因默认 20480 B 上限而被截断，与 64 MB rmem_max/wmem_max 配套使用。
 net.core.optmem_max = 524288
