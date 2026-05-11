@@ -205,15 +205,50 @@ else
     warn "无法读取 netdev_budget"
 fi
 
-# ── 18. iptables 后端一致性（Debian 11+ 专项）──────────────────────────────────
+# ── 18. iptables 后端一致性（Debian 版本感知）──────────────────────────────────
+# Debian 13+（Trixie）：正确后端是 iptables-nft（native nftables 框架）
+# Debian 11/12（Bullseye/Bookworm）：正确后端视 UFW 激活状态而定
+#   UFW 激活 → iptables-nft（与 UFW 一致）
+#   UFW 未激活 → iptables-legacy（与 netfilter-persistent 一致）
 if command -v update-alternatives &>/dev/null && \
    update-alternatives --list iptables &>/dev/null 2>&1; then
-    info "检查 iptables 后端（Debian 11+ 专项）..."
+    info "检查 iptables 后端一致性（Debian 专项）..."
+    _CK_DEB_VER=$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_ID:-0}" | cut -d. -f1)
+    _CK_DEB_INT=0
+    [[ "$_CK_DEB_VER" =~ ^[0-9]+$ ]] && _CK_DEB_INT="$_CK_DEB_VER"
     IPTR=$(update-alternatives --query iptables 2>/dev/null | awk '/^Value:/{print $2}')
-    if [[ "$IPTR" == *"legacy"* ]]; then
-        pass "iptables 后端为 legacy（与 netfilter-persistent 兼容，无 nft/legacy 混用风险）"
+    if [[ "$_CK_DEB_INT" -ge 13 ]]; then
+        # Debian 13+：必须是 nft，legacy 会与 UFW/nftables 产生规则隔离，NAT 静默失效
+        if [[ "$IPTR" == *"nft"* ]]; then
+            pass "iptables 后端为 nft（Debian 13 正确：与 UFW/nftables 共用同一框架，无规则隔离）"
+        else
+            fail "iptables 后端为 legacy（${IPTR}）——Debian 13 上 legacy 写入独立 xtables 子系统，" \
+                 "与 UFW/nftables 的 FORWARD/NAT 规则完全隔离，VPN 流量 NAT 可能静默失效；" \
+                 "请重新运行 setup-server.sh 修复"
+        fi
     else
-        warn "iptables 后端为 nft（${IPTR}）——若同时使用 netfilter-persistent 持久化规则，重启后可能出现规则不一致；建议重新运行 setup-server.sh 切换为 legacy"
+        # Debian 11/12：看 UFW 是否激活
+        _CK_UFW_ACTIVE=false
+        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+            _CK_UFW_ACTIVE=true
+        fi
+        if $_CK_UFW_ACTIVE; then
+            # UFW 激活：nft 正确，legacy 会与 UFW 不一致
+            if [[ "$IPTR" == *"nft"* ]]; then
+                pass "iptables 后端为 nft（Debian 11/12 + UFW 激活：与 UFW 一致）"
+            else
+                warn "iptables 后端为 legacy（${IPTR}）——UFW 激活时 Debian 11/12 也应使用 nft 后端；" \
+                     "建议重新运行 setup-server.sh"
+            fi
+        else
+            # UFW 未激活：legacy 正确，nft 与 netfilter-persistent 可能不一致
+            if [[ "$IPTR" == *"legacy"* ]]; then
+                pass "iptables 后端为 legacy（Debian 11/12 + UFW 未激活：与 netfilter-persistent 兼容）"
+            else
+                warn "iptables 后端为 nft（${IPTR}）——UFW 未激活时若与 netfilter-persistent 同用，" \
+                     "重启后可能出现规则不一致；建议重新运行 setup-server.sh"
+            fi
+        fi
     fi
 fi
 

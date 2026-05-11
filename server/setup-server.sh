@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# WireGuard VPN Server Setup — San Jose Debian Linux (Debian 11+ / Ubuntu 20.04+)
+# WireGuard VPN Server Setup — San Jose Debian Linux
+# 适用系统：Debian 13 (Trixie) / Debian 11 (Bullseye) / Debian 12 (Bookworm)
 # 用途：将大阪 Windows 机器的所有流量通过本服务器出口，完全伪装为美国 IP
-# 防火墙：UFW（Debian 默认）或 iptables-persistent（无 UFW 时）
+# 防火墙：UFW（Debian 默认激活）或 iptables-persistent（无 UFW 时）
 # 运行方式：sudo bash setup-server.sh
 # =============================================================================
 set -euo pipefail
@@ -41,41 +42,73 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     wireguard wireguard-tools iptables iptables-persistent iproute2 \
     openssl curl
 
-# ── 1.5 iptables 后端统一（Debian 11+ 默认为 nftables，切换 legacy 以兼容 wg-quick 和 netfilter-persistent）──
-# Debian 11/12 的 update-alternatives 使 iptables 指向 iptables-nft；
-# netfilter-persistent 通过 iptables-save/restore 持久化规则，若 nft 和 legacy 后端混用
-# 会在重启后导致规则不一致甚至 NAT/FORWARD 规则消失。
-# 切换到统一的 legacy 后端可彻底避免此问题。
-info "统一 iptables 后端为 legacy（Debian 11+ 专项）..."
-if command -v update-alternatives &>/dev/null && [[ -f /usr/sbin/iptables-legacy ]]; then
-    # 若 UFW 已激活（使用 nft 后端），先禁用再切换再重建，防止 nft 规则残留
-    _UFW_WAS_ACTIVE=false
-    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-        _UFW_WAS_ACTIVE=true
-        ufw disable > /dev/null 2>&1 || true
-    fi
-    update-alternatives --set iptables           /usr/sbin/iptables-legacy           2>/dev/null || true
-    update-alternatives --set ip6tables          /usr/sbin/ip6tables-legacy          2>/dev/null || true
-    update-alternatives --set iptables-save      /usr/sbin/iptables-legacy-save      2>/dev/null || true
-    update-alternatives --set ip6tables-save     /usr/sbin/ip6tables-legacy-save     2>/dev/null || true
-    update-alternatives --set iptables-restore   /usr/sbin/iptables-legacy-restore   2>/dev/null || true
-    update-alternatives --set ip6tables-restore  /usr/sbin/ip6tables-legacy-restore  2>/dev/null || true
-    if $_UFW_WAS_ACTIVE; then
-        ufw --force enable > /dev/null 2>&1 || true
-    fi
-    info "iptables 后端：$(iptables --version 2>/dev/null | head -1)"
-else
-    warn "未检测到 iptables-legacy 或 update-alternatives，将使用当前默认后端"
-fi
+# ── 1.5 iptables 后端选择（版本感知：Debian 13+ 用 nft；Debian 11/12 视 UFW 状态选择）──
+#
+# 架构说明：
+#   Debian 13 (Trixie)+：内核 nftables 为唯一 netfilter 框架。UFW 通过 iptables-nft
+#   shim 写规则到 nftables compat 表。wg-quick PostUp 也必须用 iptables（→ iptables-nft）
+#   写到同一 nftables 框架，否则 iptables-legacy 写到老 xtables 子系统，与 nftables 互相
+#   隔离——UFW 的 DEFAULT_FORWARD_POLICY=ACCEPT 在 nftables，iptables-legacy 的
+#   MASQUERADE/FORWARD 在 xtables，二者对同一数据包的处理互不感知，导致 NAT 静默失效。
+#
+#   Debian 11/12 (Bullseye/Bookworm)：iptables-nft 为默认后端，legacy 仍可用。
+#   - UFW 激活时：UFW 用 iptables-nft，wg-quick 也用 iptables-nft → 一致，无需 legacy。
+#   - UFW 未激活时：netfilter-persistent 用 iptables-save/restore；若 nft 和 legacy 混用
+#     会在重启后规则不一致，切换到 legacy 确保统一。
+#
+# 结论：Debian 13+ 永远不切 legacy；Debian 11/12 仅在 UFW 未激活时切 legacy。
 
-# 确定 wg0.conf 中使用的 iptables 命令（直接用全路径，不依赖 update-alternatives 运行时状态）
-if [[ -x /usr/sbin/iptables-legacy ]]; then
-    _IPTABLES="iptables-legacy"
-    _IP6TABLES="ip6tables-legacy"
+info "检测 Debian 版本，选择 iptables 后端..."
+_DEB_VER=$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_ID:-0}" | cut -d. -f1)
+_DEB_VER_INT=0
+[[ "$_DEB_VER" =~ ^[0-9]+$ ]] && _DEB_VER_INT="$_DEB_VER"
+
+# 初始化：默认使用 iptables（→ iptables-nft，Debian 默认）
+_IPTABLES="iptables"
+_IP6TABLES="ip6tables"
+
+if [[ "$_DEB_VER_INT" -ge 13 ]]; then
+    # ── Debian 13+ (Trixie)：强制 iptables → iptables-nft，禁止切换 legacy ──
+    # 理由：Debian 13 的 nftables 是唯一 netfilter 框架；iptables-legacy 写入独立的
+    # xtables 子系统，与 UFW/nftables 的 FORWARD/NAT 规则完全隔离，导致 VPN 流量无法被 NAT。
+    info "Debian 13 (Trixie) 检测到：确保 iptables → iptables-nft（不切换 legacy）..."
+    if command -v update-alternatives &>/dev/null && [[ -f /usr/sbin/iptables-nft ]]; then
+        update-alternatives --set iptables          /usr/sbin/iptables-nft          2>/dev/null || true
+        update-alternatives --set ip6tables         /usr/sbin/ip6tables-nft         2>/dev/null || true
+        update-alternatives --set iptables-save     /usr/sbin/iptables-nft-save     2>/dev/null || true
+        update-alternatives --set ip6tables-save    /usr/sbin/ip6tables-nft-save    2>/dev/null || true
+        update-alternatives --set iptables-restore  /usr/sbin/iptables-nft-restore  2>/dev/null || true
+        update-alternatives --set ip6tables-restore /usr/sbin/ip6tables-nft-restore 2>/dev/null || true
+    fi
+    # _IPTABLES 保持 "iptables"（→ iptables-nft）
+elif command -v update-alternatives &>/dev/null && [[ -f /usr/sbin/iptables-legacy ]]; then
+    # ── Debian 11/12：根据 UFW 状态决定后端 ──
+    _UFW_ACTIVE_NOW=false
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        _UFW_ACTIVE_NOW=true
+    fi
+    if ! $_UFW_ACTIVE_NOW; then
+        # UFW 未激活：切换到 legacy，确保 netfilter-persistent 用同一后端持久化规则
+        # 切换前无需禁用 UFW（UFW 当前未激活，无 nft 规则残留风险）
+        info "Debian 11/12 + UFW 未激活：切换 iptables → legacy（netfilter-persistent 兼容）..."
+        update-alternatives --set iptables          /usr/sbin/iptables-legacy          2>/dev/null || true
+        update-alternatives --set ip6tables         /usr/sbin/ip6tables-legacy         2>/dev/null || true
+        update-alternatives --set iptables-save     /usr/sbin/iptables-legacy-save     2>/dev/null || true
+        update-alternatives --set ip6tables-save    /usr/sbin/ip6tables-legacy-save    2>/dev/null || true
+        update-alternatives --set iptables-restore  /usr/sbin/iptables-legacy-restore  2>/dev/null || true
+        update-alternatives --set ip6tables-restore /usr/sbin/ip6tables-legacy-restore 2>/dev/null || true
+        _IPTABLES="iptables-legacy"
+        _IP6TABLES="ip6tables-legacy"
+    else
+        # UFW 激活：UFW 用 iptables-nft，wg-quick 也用 iptables-nft → 一致
+        # 无需切换 legacy；netfilter-persistent save 在 UFW 激活时不会被调用
+        info "Debian 11/12 + UFW 已激活：保持 iptables → iptables-nft（与 UFW 一致）..."
+        # _IPTABLES 保持 "iptables"（→ iptables-nft）
+    fi
 else
-    _IPTABLES="iptables"
-    _IP6TABLES="ip6tables"
+    warn "无法检测 Debian 版本或 update-alternatives 不可用，使用当前默认 iptables 后端"
 fi
+info "iptables 后端：$(iptables --version 2>/dev/null | head -1)"
 
 # ── 2. 内核参数优化（低延迟 + 高吞吐量） ────────────────────────────────────────
 info "优化内核网络参数..."

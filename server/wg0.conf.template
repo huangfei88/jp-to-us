@@ -1,6 +1,13 @@
 # ============================================================
 # WireGuard Server 配置模板 — San Jose Linux
+# 适用：Debian 13 (Trixie) / Debian 11 (Bullseye) / Debian 12 (Bookworm)
 # 此文件由 setup-server.sh 自动生成，此处为参考模板
+#
+# iptables 命令说明：
+#   Debian 13+：iptables → iptables-nft（nftables 框架，UFW 同框架）
+#   Debian 11/12 + UFW 未激活：iptables-legacy（独立 xtables，与 netfilter-persistent 一致）
+#   Debian 11/12 + UFW 激活：iptables → iptables-nft（与 UFW 一致）
+#   setup-server.sh 会自动检测并在生成的实际 wg0.conf 中填入正确的全路径命令
 # ============================================================
 
 [Interface]
