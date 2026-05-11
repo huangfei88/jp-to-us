@@ -109,6 +109,17 @@ net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
 net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
+# 禁止源路由（Source Routing）——防止攻击者操纵数据包路径绕过防火墙和 NAT 规则
+# 默认在转发主机上应为 0，但显式设置保证安全基线不受其他配置覆盖
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+
+# ── 软中断数据包预算（提升高负载吞吐量）──
+# 每次 NAPI poll 处理的最大数据包数（默认 300）——对高速 VPN 转发场景可提升吞吐量
+# 防止网卡在大流量时因配额不足被频繁打断，减少 CPU 上下文切换
+net.core.netdev_budget = 600
 SYSCTL
 # 预加载 BBR 模块（如果可用）——必须在 sysctl -p 之前，否则在以模块形式编译 BBR 的内核上
 # sysctl -p 对 tcp_congestion_control = bbr 报 "Invalid argument"，set -e 会中断整个脚本
@@ -200,10 +211,17 @@ PostDown = ip6tables -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
 PostDown = ip6tables -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
 # ── MSS 钳制：防止跨 MTU 边界导致 TCP 连接卡住（企业级必须）──
-PostUp   = iptables  -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = iptables  -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostUp   = ip6tables -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip6tables -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+# 双向精确匹配：避免宽泛规则影响非 VPN FORWARD 流量
+# 入方向（客户端→互联网）：出口为 ${PUB_IF}，clamping 使用其 MTU（无害但保持对称）
+# 出方向（互联网→客户端）：出口为 ${WG_IFACE}（MTU 1420），防止大包进隧道时被分片
+PostUp   = iptables  -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = iptables  -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables  -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables  -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ip6tables -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ip6tables -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip6tables -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip6tables -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # ── MTU：避免分片，适合日本到美国的太平洋链路 ────────────────
 MTU = 1420

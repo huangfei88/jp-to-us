@@ -20,16 +20,21 @@ PostUp   = iptables  -A FORWARD -i wg0 -o <ETH_INTERFACE> -j ACCEPT
 PostUp   = iptables  -A FORWARD -i <ETH_INTERFACE> -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 PostUp   = ip6tables -A FORWARD -i wg0 -o <ETH_INTERFACE> -j ACCEPT
 PostUp   = ip6tables -A FORWARD -i <ETH_INTERFACE> -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostUp   = iptables  -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostUp   = ip6tables -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+# ── MSS 钳制：双向精确匹配（企业级必须，防止大包进隧道时分片卡死）──
+PostUp   = iptables  -A FORWARD -i wg0 -o <ETH_INTERFACE> -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = iptables  -A FORWARD -i <ETH_INTERFACE> -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ip6tables -A FORWARD -i wg0 -o <ETH_INTERFACE> -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ip6tables -A FORWARD -i <ETH_INTERFACE> -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 PostDown = iptables  -t nat -D POSTROUTING -s 10.10.0.0/24  -o <ETH_INTERFACE> -j MASQUERADE
 PostDown = ip6tables -t nat -D POSTROUTING -s fd10:cafe::/64 -o <ETH_INTERFACE> -j MASQUERADE
 PostDown = iptables  -D FORWARD -i wg0 -o <ETH_INTERFACE> -j ACCEPT
 PostDown = iptables  -D FORWARD -i <ETH_INTERFACE> -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 PostDown = ip6tables -D FORWARD -i wg0 -o <ETH_INTERFACE> -j ACCEPT
 PostDown = ip6tables -D FORWARD -i <ETH_INTERFACE> -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostDown = iptables  -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip6tables -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables  -D FORWARD -i wg0 -o <ETH_INTERFACE> -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables  -D FORWARD -i <ETH_INTERFACE> -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip6tables -D FORWARD -i wg0 -o <ETH_INTERFACE> -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip6tables -D FORWARD -i <ETH_INTERFACE> -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # ── 客户端 Peer ─────────────────────────────────────────────
 [Peer]
