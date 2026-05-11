@@ -24,6 +24,9 @@ WG_SUBNET_V6="fd10:cafe::/64"      # 隧道 IPv6 子网
 WG_SERVER_V6="fd10:cafe::1"        # 服务端隧道 IPv6
 WG_CLIENT_V6="fd10:cafe::2"        # 客户端隧道 IPv6
 KEY_DIR="/etc/wireguard/keys"
+# conntrack 哈希桶数 = nf_conntrack_max / 4（建议比例，平衡内存与查找性能）
+# 若修改 sysctl 中的 nf_conntrack_max，请同步调整此值
+CONNTRACK_HASHSIZE=131072
 
 # 自动检测出口网卡（排除 lo / wg*）
 PUB_IF=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
@@ -70,7 +73,9 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.ip_local_port_range = 10000 65535
 # TCP MTU 探测：防止跨太平洋链路上 PMTUD 黑洞导致 TCP 连接卡死（企业级必须）
 net.ipv4.tcp_mtu_probing = 1
-# socket 选项内存上限（必须与大缓冲区匹配，64 MB 缓冲区配套不能低于 524288）
+# socket 选项内存上限：辅助数据（ancillary data / cmsg）的每套接字内存上限。
+# 512 KB（524288 B）确保大缓冲区场景下 IP_PKTINFO、SO_TIMESTAMPING 等辅助选项
+# 不会因默认 20480 B 上限而被截断，与 64 MB rmem_max/wmem_max 配套使用。
 net.core.optmem_max = 524288
 # TCP Keepalive：加速检测死连接，避免NAT表和conntrack资源被僵尸连接占用
 net.ipv4.tcp_keepalive_time = 300
@@ -112,13 +117,13 @@ modprobe tcp_bbr 2>/dev/null || true
 modprobe nf_conntrack 2>/dev/null || true
 sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
 
-# 设置 conntrack 哈希桶数（建议值 = nf_conntrack_max / 4 = 131072）
+# 设置 conntrack 哈希桶数（建议值 = nf_conntrack_max / 4）
 # hashsize 仅可在模块加载后通过 sysfs 写入，不走 sysctl
 if [[ -f /sys/module/nf_conntrack/parameters/hashsize ]]; then
-    echo 131072 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
+    echo "${CONNTRACK_HASHSIZE}" > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
 fi
 # 持久化：模块加载时自动设置 hashsize（重启后仍生效）
-echo 'options nf_conntrack hashsize=131072' > /etc/modprobe.d/nf-conntrack.conf
+echo "options nf_conntrack hashsize=${CONNTRACK_HASHSIZE}" > /etc/modprobe.d/nf-conntrack.conf
 
 # 检查 BBR 是否真正生效
 if sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
