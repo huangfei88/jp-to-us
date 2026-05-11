@@ -117,14 +117,15 @@ if ($smhnr -eq 1) {
 # ── 8. 检查默认路由 ───────────────────────────────────────────────────────────
 Write-Info "检查默认路由..."
 $defaultRoutes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
-    Sort-Object { [int]$_.RouteMetric + [int]$_.InterfaceMetric }
+    Select-Object *, @{N='CombinedMetric'; E={[int]$_.RouteMetric + [int]$_.InterfaceMetric}} |
+    Sort-Object CombinedMetric
 $bestRoute = $defaultRoutes | Select-Object -First 1
 if ($null -eq $bestRoute) {
     Write-Fail "未找到 IPv4 默认路由（0.0.0.0/0），网络可能未正确配置"
 } else {
     $routeAdapter = Get-NetAdapter -InterfaceIndex $bestRoute.InterfaceIndex -ErrorAction SilentlyContinue
     $routeIface = if ($null -ne $routeAdapter) { $routeAdapter.Name } else { "未知" }
-    Write-Host "  默认路由出口网卡：$routeIface（综合指标：$([int]$bestRoute.RouteMetric + [int]$bestRoute.InterfaceMetric)）" -ForegroundColor Yellow
+    Write-Host "  默认路由出口网卡：$routeIface（综合指标：$($bestRoute.CombinedMetric)）" -ForegroundColor Yellow
     if ($routeIface -like "*WireGuard*" -or $routeIface -like "*$TUNNEL_NAME*") {
         Write-Pass "默认路由经过 WireGuard 隧道 ✓"
     } else {

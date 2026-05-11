@@ -175,10 +175,10 @@ Set-ItemProperty -Path $policyPath -Name "DisableSmartNameResolution" -Value 1 -
 
 # 4-e. 等待 WireGuard 适配器就绪（Windows Server 2022 上驱动注册可能需要最多 30 秒）
 # Kill Switch 规则的 -InterfaceAlias 需要适配器处于 Up 状态才能正确绑定
-# 最多等待 30 秒（15 次 × 2 秒）
+$maxRetries = 15          # 每次等待 2 秒，共最多 $maxRetries × 2 = 30 秒
 Write-Info "等待 WireGuard 网卡就绪..."
 $wgAdapter = $null
-for ($i = 0; $i -lt 15; $i++) {
+for ($i = 0; $i -lt $maxRetries; $i++) {
     $wgAdapter = Get-NetAdapter | Where-Object {
         ($_.Name -like "*$WG_TUNNEL_NAME*" -or $_.InterfaceDescription -like "*WireGuard*") -and
         $_.Status -eq "Up"
