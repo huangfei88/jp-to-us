@@ -52,7 +52,8 @@ if ($wgAdapter -and $wgAdapter.Status -eq "Up") {
 # ── 3. 检查当前出口 IP ────────────────────────────────────────────────────────
 Write-Info "检查出口 IPv4..."
 try {
-    $ipv4 = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json" -TimeoutSec 10).ip
+    # -UseBasicParsing：Server 2022 IE ESC 默认开启，不加此参数会因 IE COM 不可用而失败
+    $ipv4 = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json" -TimeoutSec 10 -UseBasicParsing).ip
     Write-Host "  当前出口 IPv4：$ipv4" -ForegroundColor Yellow
     Write-Pass "IPv4 出口可达（请确认上方 IP 为圣何塞美国 IP）"
 } catch {
@@ -62,7 +63,7 @@ try {
 # ── 4. 检查 IPv6 泄露 ─────────────────────────────────────────────────────────
 Write-Info "检查 IPv6 泄露..."
 try {
-    $ipv6 = (Invoke-RestMethod -Uri "https://api6.ipify.org?format=json" -TimeoutSec 5).ip
+    $ipv6 = (Invoke-RestMethod -Uri "https://api6.ipify.org?format=json" -TimeoutSec 5 -UseBasicParsing).ip
     Write-Host "  检测到 IPv6 出口：$ipv6" -ForegroundColor Yellow
     # 由于已禁用物理网卡 IPv6 且 AllowedIPs 包含 ::/0，IPv6 必然走隧道
     # 此处显示的是服务器的公网 IPv6，请人工确认为美国 IP

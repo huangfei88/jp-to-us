@@ -1,11 +1,12 @@
 <#
 .SYNOPSIS
-    WireGuard 全流量 VPN 客户端安装脚本 — Osaka Windows
+    WireGuard 全流量 VPN 客户端安装脚本 — Osaka Windows Server 2022 Datacenter
     将 Windows 所有网络流量路由通过圣何塞 Linux 服务器出口
 .DESCRIPTION
     - 自动下载并安装 WireGuard for Windows
     - 导入客户端配置（全隧道 + DNS 防泄露）
     - 调整 Windows 网络设置防止各类泄露（WebRTC / IPv6 / DNS）
+    - 适配 Windows Server 2022 Datacenter（IE 增强安全配置、Hyper-V vNIC 排除）
     - 需要以管理员权限运行
 .NOTES
     使用前请先将 wg-client.conf 放到与本脚本相同目录，
@@ -135,21 +136,30 @@ Write-Info "隧道服务运行中 ✓"
 # ═════════════════════════════════════════════════════════════════════════════
 
 # 4-a. 禁用其他网卡的 IPv6（防止 IPv6 绕过隧道）
-# 注意：同时排除名称含隧道名和描述含 WireGuard 的适配器，避免误禁隧道接口本身
+# 排除：隧道接口本身、WireGuard 描述的适配器、Hyper-V 虚拟交换机适配器
+# （Server 2022 Datacenter 上 Hyper-V vNIC 若被禁用 IPv6 会破坏 VM 网络）
 Write-Info "禁用非 WireGuard 网卡的 IPv6..."
 Get-NetAdapter | Where-Object {
     $_.Name -notlike "*$WG_TUNNEL_NAME*" -and
     $_.InterfaceDescription -notlike "*WireGuard*" -and
+    $_.InterfaceDescription -notlike "*Hyper-V*" -and
     $_.Status -eq "Up"
 } | ForEach-Object {
     Disable-NetAdapterBinding -Name $_.Name -ComponentID "ms_tcpip6" -ErrorAction SilentlyContinue
     Write-Warn "  已禁用 $($_.Name) 的 IPv6"
 }
 
-# 4-b. 强制 DNS 设置（覆盖所有非 VPN 网卡，防止 DNS 泄露）
-Write-Info "锁定所有网卡 DNS 到隧道 DNS..."
+# 4-b. 强制 DNS 设置（覆盖所有非 VPN / 非 Hyper-V 网卡，防止 DNS 泄露）
+# 排除 WireGuard 隧道接口（WireGuard 自身管理该接口的 DNS）和 Hyper-V vNIC
+# （修改 Hyper-V 虚拟适配器 DNS 会影响 VM 内部 DNS 解析，Server 2022 必须排除）
+Write-Info "锁定物理网卡 DNS 到隧道 DNS..."
 $vpnDns = @("1.1.1.1", "1.0.0.1")
-Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | ForEach-Object {
+Get-NetAdapter | Where-Object {
+    $_.Status -eq "Up" -and
+    $_.Name -notlike "*$WG_TUNNEL_NAME*" -and
+    $_.InterfaceDescription -notlike "*WireGuard*" -and
+    $_.InterfaceDescription -notlike "*Hyper-V*"
+} | ForEach-Object {
     Set-DnsClientServerAddress -InterfaceAlias $_.Name -ServerAddresses $vpnDns -ErrorAction SilentlyContinue
 }
 
@@ -163,11 +173,22 @@ $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
 if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force | Out-Null }
 Set-ItemProperty -Path $policyPath -Name "DisableSmartNameResolution" -Value 1 -Type DWord -Force
 
-# 4-e. 强制路由：确保默认路由走 WireGuard 网卡
-Start-Sleep 2
-$wgAdapter = Get-NetAdapter | Where-Object { $_.Name -like "*$WG_TUNNEL_NAME*" -or $_.InterfaceDescription -like "*WireGuard*" } | Select-Object -First 1
+# 4-e. 等待 WireGuard 适配器就绪（Windows Server 2022 上驱动注册可能有 5–15 秒延迟）
+# Kill Switch 规则的 -InterfaceAlias 需要适配器处于 Up 状态才能正确绑定
+Write-Info "等待 WireGuard 网卡就绪..."
+$wgAdapter = $null
+for ($i = 0; $i -lt 15; $i++) {
+    $wgAdapter = Get-NetAdapter | Where-Object {
+        ($_.Name -like "*$WG_TUNNEL_NAME*" -or $_.InterfaceDescription -like "*WireGuard*") -and
+        $_.Status -eq "Up"
+    } | Select-Object -First 1
+    if ($wgAdapter) { break }
+    Start-Sleep 2
+}
 if ($wgAdapter) {
-    Write-Info "WireGuard 网卡：$($wgAdapter.Name) — 接口指标已由 WireGuard 配置管理"
+    Write-Info "WireGuard 网卡就绪：$($wgAdapter.Name) ✓"
+} else {
+    Write-Warn "WireGuard 网卡在 30 秒内未进入 Up 状态，Kill Switch InterfaceAlias 规则可能未立即生效（规则已写入，适配器上线后自动应用）"
 }
 
 # 4-f. Kill Switch — VPN 断线时阻断所有流量（企业级安全）
@@ -257,7 +278,9 @@ Start-Sleep 5
 
 Write-Info "检查当前出口 IP..."
 try {
-    $currentIP = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json" -TimeoutSec 10).ip
+    # -UseBasicParsing：Server 2022 默认启用 IE 增强安全配置（IE ESC），
+    # 不加此参数 Invoke-RestMethod 会因 IE COM 引擎不可用而抛出异常
+    $currentIP = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json" -TimeoutSec 10 -UseBasicParsing).ip
     Write-Host ""
     Write-Host "  当前出口 IP：$currentIP" -ForegroundColor Cyan
     Write-Host "  请访问 https://ipleak.net 确认显示为美国（圣何塞）IP" -ForegroundColor Cyan

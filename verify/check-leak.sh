@@ -205,6 +205,33 @@ else
     warn "无法读取 netdev_budget"
 fi
 
+# ── 18. iptables 后端一致性（Debian 11+ 专项）──────────────────────────────────
+if command -v update-alternatives &>/dev/null && \
+   update-alternatives --list iptables &>/dev/null 2>&1; then
+    info "检查 iptables 后端（Debian 11+ 专项）..."
+    IPTR=$(update-alternatives --query iptables 2>/dev/null | awk '/^Value:/{print $2}')
+    if [[ "$IPTR" == *"legacy"* ]]; then
+        pass "iptables 后端为 legacy（与 netfilter-persistent 兼容，无 nft/legacy 混用风险）"
+    else
+        warn "iptables 后端为 nft（${IPTR}）——若同时使用 netfilter-persistent 持久化规则，重启后可能出现规则不一致；建议重新运行 setup-server.sh 切换为 legacy"
+    fi
+fi
+
+# ── 19. UFW 防火墙状态（Debian 专项）──────────────────────────────────────────
+if command -v ufw &>/dev/null; then
+    info "检查 UFW 状态（Debian 专项）..."
+    if ufw status 2>/dev/null | grep -q "Status: active"; then
+        pass "UFW 已激活"
+        if ufw status 2>/dev/null | grep -qE "${WG_PORT}/(udp|UDP)"; then
+            pass "UFW 已开放 WireGuard 端口 ${WG_PORT}/udp"
+        else
+            fail "UFW 未开放 WireGuard 端口 ${WG_PORT}/udp（握手包将被丢弃，隧道无法建立）"
+        fi
+    else
+        warn "UFW 已安装但未激活（当前由 iptables/netfilter-persistent 直接管理规则）"
+    fi
+fi
+
 # ── 结果汇总 ──────────────────────────────────────────────────────────────────
 echo ""
 echo "═══════════════════════════════════════════════════════"

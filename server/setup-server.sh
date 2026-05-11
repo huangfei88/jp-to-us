@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
-# WireGuard VPN Server Setup — San Jose Linux (Ubuntu 20.04 / 22.04 / Debian 11+)
+# WireGuard VPN Server Setup — San Jose Debian Linux (Debian 11+ / Ubuntu 20.04+)
 # 用途：将大阪 Windows 机器的所有流量通过本服务器出口，完全伪装为美国 IP
+# 防火墙：UFW（Debian 默认）或 iptables-persistent（无 UFW 时）
 # 运行方式：sudo bash setup-server.sh
 # =============================================================================
 set -euo pipefail
@@ -39,6 +40,42 @@ apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
     wireguard wireguard-tools iptables iptables-persistent iproute2 \
     openssl curl
+
+# ── 1.5 iptables 后端统一（Debian 11+ 默认为 nftables，切换 legacy 以兼容 wg-quick 和 netfilter-persistent）──
+# Debian 11/12 的 update-alternatives 使 iptables 指向 iptables-nft；
+# netfilter-persistent 通过 iptables-save/restore 持久化规则，若 nft 和 legacy 后端混用
+# 会在重启后导致规则不一致甚至 NAT/FORWARD 规则消失。
+# 切换到统一的 legacy 后端可彻底避免此问题。
+info "统一 iptables 后端为 legacy（Debian 11+ 专项）..."
+if command -v update-alternatives &>/dev/null && [[ -f /usr/sbin/iptables-legacy ]]; then
+    # 若 UFW 已激活（使用 nft 后端），先禁用再切换再重建，防止 nft 规则残留
+    _UFW_WAS_ACTIVE=false
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        _UFW_WAS_ACTIVE=true
+        ufw disable > /dev/null 2>&1 || true
+    fi
+    update-alternatives --set iptables           /usr/sbin/iptables-legacy           2>/dev/null || true
+    update-alternatives --set ip6tables          /usr/sbin/ip6tables-legacy          2>/dev/null || true
+    update-alternatives --set iptables-save      /usr/sbin/iptables-legacy-save      2>/dev/null || true
+    update-alternatives --set ip6tables-save     /usr/sbin/ip6tables-legacy-save     2>/dev/null || true
+    update-alternatives --set iptables-restore   /usr/sbin/iptables-legacy-restore   2>/dev/null || true
+    update-alternatives --set ip6tables-restore  /usr/sbin/ip6tables-legacy-restore  2>/dev/null || true
+    if $_UFW_WAS_ACTIVE; then
+        ufw --force enable > /dev/null 2>&1 || true
+    fi
+    info "iptables 后端：$(iptables --version 2>/dev/null | head -1)"
+else
+    warn "未检测到 iptables-legacy 或 update-alternatives，将使用当前默认后端"
+fi
+
+# 确定 wg0.conf 中使用的 iptables 命令（直接用全路径，不依赖 update-alternatives 运行时状态）
+if [[ -x /usr/sbin/iptables-legacy ]]; then
+    _IPTABLES="iptables-legacy"
+    _IP6TABLES="ip6tables-legacy"
+else
+    _IPTABLES="iptables"
+    _IP6TABLES="ip6tables"
+fi
 
 # ── 2. 内核参数优化（低延迟 + 高吞吐量） ────────────────────────────────────────
 info "优化内核网络参数..."
@@ -193,35 +230,35 @@ ListenPort = ${WG_PORT}
 PrivateKey = ${SERVER_PRIV}
 
 # ── NAT：所有客户端流量从 ${PUB_IF} 出口 ──────────────────
-PostUp   = iptables  -t nat -A POSTROUTING -s ${WG_SUBNET_V4} -o ${PUB_IF} -j MASQUERADE
-PostUp   = ip6tables -t nat -A POSTROUTING -s ${WG_SUBNET_V6} -o ${PUB_IF} -j MASQUERADE
-PostDown = iptables  -t nat -D POSTROUTING -s ${WG_SUBNET_V4} -o ${PUB_IF} -j MASQUERADE
-PostDown = ip6tables -t nat -D POSTROUTING -s ${WG_SUBNET_V6} -o ${PUB_IF} -j MASQUERADE
+PostUp   = ${_IPTABLES}  -t nat -A POSTROUTING -s ${WG_SUBNET_V4} -o ${PUB_IF} -j MASQUERADE
+PostUp   = ${_IP6TABLES} -t nat -A POSTROUTING -s ${WG_SUBNET_V6} -o ${PUB_IF} -j MASQUERADE
+PostDown = ${_IPTABLES}  -t nat -D POSTROUTING -s ${WG_SUBNET_V4} -o ${PUB_IF} -j MASQUERADE
+PostDown = ${_IP6TABLES} -t nat -D POSTROUTING -s ${WG_SUBNET_V6} -o ${PUB_IF} -j MASQUERADE
 
 # ── 转发规则（入→出 / 出→入） ─────────────────────────────
-PostUp   = iptables  -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
-PostUp   = iptables  -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostDown = iptables  -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
-PostDown = iptables  -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp   = ${_IPTABLES}  -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
+PostUp   = ${_IPTABLES}  -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostDown = ${_IPTABLES}  -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
+PostDown = ${_IPTABLES}  -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
 # ── IPv6 转发规则（与 IPv4 对称，保证 ::/0 客户端流量正常转发）──
-PostUp   = ip6tables -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
-PostUp   = ip6tables -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostDown = ip6tables -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
-PostDown = ip6tables -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp   = ${_IP6TABLES} -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
+PostUp   = ${_IP6TABLES} -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostDown = ${_IP6TABLES} -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
+PostDown = ${_IP6TABLES} -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
 # ── MSS 钳制：防止跨 MTU 边界导致 TCP 连接卡住（企业级必须）──
 # 双向精确匹配：避免宽泛规则影响非 VPN FORWARD 流量
 # 入方向（客户端→互联网）：出口为 ${PUB_IF}，clamping 使用其 MTU（无害但保持对称）
 # 出方向（互联网→客户端）：出口为 ${WG_IFACE}（MTU 1420），防止大包进隧道时被分片
-PostUp   = iptables  -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostUp   = iptables  -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = iptables  -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = iptables  -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostUp   = ip6tables -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostUp   = ip6tables -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip6tables -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip6tables -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ${_IPTABLES}  -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ${_IPTABLES}  -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ${_IPTABLES}  -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ${_IPTABLES}  -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ${_IP6TABLES} -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ${_IP6TABLES} -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ${_IP6TABLES} -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ${_IP6TABLES} -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # ── MTU：避免分片，适合日本到美国的太平洋链路 ────────────────
 MTU = 1420
@@ -237,25 +274,41 @@ chmod 600 /etc/wireguard/wg0.conf
 
 # ── 5. 开放防火墙端口 ──────────────────────────────────────────────────────────
 info "开放 UDP ${WG_PORT}..."
+
+# 检测 UFW 是否激活
+# UFW 激活时：仅通过 ufw 命令管理所有规则（UFW 自身处理规则持久化）。
+# 不得额外操作 iptables INPUT 链，也不可运行 netfilter-persistent save：
+# 二者同时存在会在重启后互相叠加规则（UFW 重载 + netfilter-persistent restore），
+# 导致 INPUT/FORWARD/NAT 规则翻倍，破坏防火墙和 conntrack 正确性。
+_UFW_ACTIVE=false
 if command -v ufw &>/dev/null; then
     ufw allow "${WG_PORT}/udp" > /dev/null
-    ufw allow OpenSSH        > /dev/null
-    # 允许转发
-    sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
-    ufw --force reload       > /dev/null
+    ufw allow OpenSSH         > /dev/null
+    # DEFAULT_FORWARD_POLICY=ACCEPT 是 UFW 允许内核 FORWARD 链生效的前提（wg-quick PostUp 依赖此策略）
+    sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' \
+        /etc/default/ufw 2>/dev/null || true
+    ufw --force reload > /dev/null
+    if ufw status 2>/dev/null | grep -q "Status: active"; then
+        _UFW_ACTIVE=true
+        info "UFW 已更新并重载，WireGuard 端口 ${WG_PORT}/udp 已开放 ✓"
+    fi
 fi
-# 使用 -C 先检查规则是否存在，避免重复执行脚本时在 INPUT 链中叠加重复条目
-iptables  -C INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || \
-    iptables  -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
-ip6tables -C INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || \
-    ip6tables -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
 
-# 持久化防火墙规则（仅保存 INPUT 规则；FORWARD/NAT 由 PostUp/PostDown 动态管理）
-# 必须先停止 wg0：若 wg0 已在运行（二次安装），其 PostUp 规则已写入 iptables；
-# 若此时直接 save，这些规则会被持久化，重启后 netfilter-persistent 恢复一次，
-# wg-quick PostUp 再添加一次，造成 FORWARD/NAT 规则双重叠加，破坏 conntrack 和 NAT 正确性。
-wg-quick down "${WG_IFACE}" 2>/dev/null || true
-netfilter-persistent save > /dev/null 2>&1 || warn "netfilter-persistent save 失败，规则可能在重启后丢失"
+if ! $_UFW_ACTIVE; then
+    # UFW 未激活（或未安装）：直接管理 iptables INPUT，并用 netfilter-persistent 持久化
+    # 使用 -C 先检查规则是否存在，避免重复执行脚本时在 INPUT 链叠加重复条目
+    ${_IPTABLES}  -C INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || \
+        ${_IPTABLES}  -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
+    ${_IP6TABLES} -C INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || \
+        ${_IP6TABLES} -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
+
+    # 持久化 INPUT 规则（FORWARD/NAT 由 PostUp/PostDown 动态管理，不在此保存以防重复叠加）
+    # 必须先停止 wg0：若已在运行，PostUp 已写入 FORWARD/NAT 规则；
+    # 停止后 PostDown 自动清除，save 时不会持久化这些动态规则。
+    wg-quick down "${WG_IFACE}" 2>/dev/null || true
+    netfilter-persistent save > /dev/null 2>&1 || \
+        warn "netfilter-persistent save 失败，规则可能在重启后丢失"
+fi
 
 # ── 6. 启动并设置开机自启 ──────────────────────────────────────────────────────
 info "启动 WireGuard..."
