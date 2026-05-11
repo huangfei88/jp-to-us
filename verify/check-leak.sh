@@ -215,11 +215,11 @@ fi
 if command -v update-alternatives &>/dev/null && \
    update-alternatives --list iptables &>/dev/null 2>&1; then
     info "检查 iptables 后端一致性（Debian 专项）..."
-    _CK_DEB_VER=$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_ID:-0}" | cut -d. -f1)
-    _CK_DEB_INT=0
-    [[ "$_CK_DEB_VER" =~ ^[0-9]+$ ]] && _CK_DEB_INT="$_CK_DEB_VER"
+    _CK_DEB_MAJOR_VER=$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_ID:-0}" | cut -d. -f1)
+    _CK_DEB_MAJOR_VER_INT=0
+    [[ "$_CK_DEB_MAJOR_VER" =~ ^[0-9]+$ ]] && _CK_DEB_MAJOR_VER_INT="$_CK_DEB_MAJOR_VER"
     IPTR=$(update-alternatives --query iptables 2>/dev/null | awk '/^Value:/{print $2}')
-    if [[ "$_CK_DEB_INT" -ge 13 ]]; then
+    if [[ "$_CK_DEB_MAJOR_VER_INT" -ge 13 ]]; then
         # Debian 13+：必须是 nft，legacy 会与 UFW/nftables 产生规则隔离，NAT 静默失效
         if [[ "$IPTR" == *"nft"* ]]; then
             pass "iptables 后端为 nft（Debian 13 正确：与 UFW/nftables 共用同一框架，无规则隔离）"
