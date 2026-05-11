@@ -7,6 +7,7 @@
 # 客户端隧道 IP
 PrivateKey = <CLIENT_PRIVATE_KEY>
 Address    = 10.10.0.2/32, fd10:cafe::2/128
+MTU        = 1420
 
 # ── DNS 防泄露：全部走隧道到 Cloudflare + Google ────────────
 # 不使用系统 DNS，防止 DNS 请求绕过 VPN

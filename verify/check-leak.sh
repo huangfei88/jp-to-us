@@ -77,16 +77,32 @@ fi
 # ── 7. BBR 拥塞控制 ────────────────────────────────────────────────────────────
 info "检查 BBR 拥塞控制..."
 CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-[[ "$CC" == "bbr" ]] && pass "BBR 已启用（高性能）" || fail "BBR 未启用（当前：${CC}）"
+if [[ "$CC" == "bbr" ]]; then
+    pass "BBR 已启用（高性能）"
+else
+    warn "BBR 未启用（当前：${CC}）——建议升级内核以启用 BBR；cubic 为有效降级方案"
+fi
 
-# ── 8. 服务端公网 IP ──────────────────────────────────────────────────────────
+# ── 8. TCP MTU 探测 ────────────────────────────────────────────────────────────
+info "检查 TCP MTU 探测..."
+MTP=$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || echo 0)
+[[ "$MTP" == "1" ]] && pass "TCP MTU 探测已启用（防跨太平洋 PMTUD 黑洞）" \
+                     || fail "TCP MTU 探测未启用（可能导致隧道内 TCP 连接随机卡死）"
+
+# ── 9. ICMP 重定向 ─────────────────────────────────────────────────────────────
+info "检查 ICMP redirect 设置..."
+SR=$(sysctl -n net.ipv4.conf.all.send_redirects 2>/dev/null || echo 1)
+[[ "$SR" == "0" ]] && pass "ICMP 重定向发送已禁用（路由表安全）" \
+                   || fail "ICMP 重定向发送未禁用（可能干扰客户端路由）"
+
+# ── 10. 服务端公网 IP ─────────────────────────────────────────────────────────
 info "检查服务端出口 IP..."
 PUB_IP4=$(curl -s4 --max-time 5 https://api.ipify.org 2>/dev/null || echo "获取失败")
 PUB_IP6=$(curl -s6 --max-time 5 https://api6.ipify.org 2>/dev/null || echo "无 IPv6")
 echo -e "  服务端 IPv4：${CYAN}${PUB_IP4}${NC}"
 echo -e "  服务端 IPv6：${CYAN}${PUB_IP6}${NC}"
 
-# ── 9. WireGuard peer 状态 ────────────────────────────────────────────────────
+# ── 11. WireGuard peer 状态 ───────────────────────────────────────────────────
 info "WireGuard 连接状态："
 wg show "$WG_IFACE" 2>/dev/null || fail "无法读取 wg show 输出"
 

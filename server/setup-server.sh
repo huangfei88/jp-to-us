@@ -55,8 +55,8 @@ net.core.rmem_default = 1048576
 net.core.wmem_default = 1048576
 net.ipv4.tcp_rmem = 4096 1048576 67108864
 net.ipv4.tcp_wmem = 4096 1048576 67108864
-net.ipv4.udp_rmem_min = 8192
-net.ipv4.udp_wmem_min = 8192
+net.ipv4.udp_rmem_min = 65536
+net.ipv4.udp_wmem_min = 65536
 
 # ── 连接队列 ──
 net.core.netdev_max_backlog = 250000
@@ -68,10 +68,20 @@ net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.ip_local_port_range = 10000 65535
+# TCP MTU 探测：防止跨太平洋链路上 PMTUD 黑洞导致 TCP 连接卡死（企业级必须）
+net.ipv4.tcp_mtu_probing = 1
+# socket 选项内存上限（配合大缓冲区使用）
+net.core.optmem_max = 65536
 
-# ── 防 IP 欺骗 ──
+# ── 路由安全 / 防 ICMP 劫持 ──
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
+# 作为 NAT/转发服务器禁止发送 ICMP 重定向，防止干扰客户端路由表
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+# 不接受 ICMP 重定向，防止路由被劫持
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
 SYSCTL
 sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
 
@@ -193,6 +203,7 @@ cat > "$CLIENT_CONF" << EOF
 PrivateKey = ${CLIENT_PRIV}
 Address    = ${WG_CLIENT_V4}/32, ${WG_CLIENT_V6}/128
 DNS        = 1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001
+MTU        = 1420
 
 # ── 全隧道：所有流量（IPv4 + IPv6）走 VPN ──────────────────
 # DNS 也通过隧道，防止 DNS 泄露
