@@ -349,12 +349,10 @@ if ! $_UFW_ACTIVE; then
         warn "netfilter-persistent save 失败，规则可能在重启后丢失"
 fi
 
-# ── 6. 启动并设置开机自启 ──────────────────────────────────────────────────────
-info "启动 WireGuard..."
-systemctl enable  "wg-quick@${WG_IFACE}"
-systemctl restart "wg-quick@${WG_IFACE}"
-
-# ── 7. 生成客户端配置文件 ──────────────────────────────────────────────────────
+# ── 6. 生成客户端配置文件（在启动 WireGuard 之前完成）──────────────────────────
+# 必须先于 systemctl restart：若 wg-quick PostUp 失败（set -euo pipefail 触发），
+# 脚本立即退出，客户端配置将永远无法生成，管理员无法调试。
+# 客户端配置只依赖公网 IP 和已生成的密钥，与 WireGuard 是否运行无关。
 SERVER_PUBLIC_IP=$(curl -s4 --max-time 10 https://api.ipify.org 2>/dev/null)
 if [[ -z "$SERVER_PUBLIC_IP" ]]; then
     warn "无法从 api.ipify.org 获取公网 IP，将使用本机 IP 作为 Endpoint"
@@ -386,6 +384,11 @@ AllowedIPs   = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 EOF
 chmod 600 "$CLIENT_CONF"
+
+# ── 7. 启动并设置开机自启 ──────────────────────────────────────────────────────
+info "启动 WireGuard..."
+systemctl enable  "wg-quick@${WG_IFACE}"
+systemctl restart "wg-quick@${WG_IFACE}"
 
 # ── 8. 完成，打印摘要 ──────────────────────────────────────────────────────────
 echo ""
