@@ -18,7 +18,7 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
 # ── 配置变量（按需修改）────────────────────────────────────────────────────────
 WG_IFACE="wg0"
-WG_PORT=51820                       # WireGuard 监听端口
+WG_PORT=51820  # 必须与 check-leak.sh 中的 WG_PORT 保持一致；check-leak.sh 用此值验证 UFW 开放了正确端口
 WG_SUBNET_V4="10.10.0.0/24"        # 隧道 IPv4 子网
 WG_SERVER_V4="10.10.0.1"           # 服务端隧道 IP
 WG_CLIENT_V4="10.10.0.2"           # 客户端隧道 IP
@@ -59,15 +59,15 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
 # 结论：Debian 13+ 永远不切 legacy；Debian 11/12 仅在 UFW 未激活时切 legacy。
 
 info "检测 Debian 版本，选择 iptables 后端..."
-_DEB_VER=$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_ID:-0}" | cut -d. -f1)
-_DEB_VER_INT=0
-[[ "$_DEB_VER" =~ ^[0-9]+$ ]] && _DEB_VER_INT="$_DEB_VER"
+_DEB_MAJOR_VER=$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_ID:-0}" | cut -d. -f1)
+_DEB_MAJOR_VER_INT=0
+[[ "$_DEB_MAJOR_VER" =~ ^[0-9]+$ ]] && _DEB_MAJOR_VER_INT="$_DEB_MAJOR_VER"
 
 # 初始化：默认使用 iptables（→ iptables-nft，Debian 默认）
 _IPTABLES="iptables"
 _IP6TABLES="ip6tables"
 
-if [[ "$_DEB_VER_INT" -ge 13 ]]; then
+if [[ "$_DEB_MAJOR_VER_INT" -ge 13 ]]; then
     # ── Debian 13+ (Trixie)：强制 iptables → iptables-nft，禁止切换 legacy ──
     # 理由：Debian 13 的 nftables 是唯一 netfilter 框架；iptables-legacy 写入独立的
     # xtables 子系统，与 UFW/nftables 的 FORWARD/NAT 规则完全隔离，导致 VPN 流量无法被 NAT。

@@ -14,7 +14,8 @@ info() { echo -e "${CYAN}[INFO]${NC} $*"; }
 
 FAILED=0
 WG_IFACE="wg0"
-WG_PORT=51820  # 必须与 setup-server.sh 中的 WG_PORT 保持一致（默认 51820）
+WG_PORT=51820  # 必须与 setup-server.sh 中的 WG_PORT 保持一致（默认 51820）；
+               # 此值用于验证 UFW 已开放正确端口（见下方步骤 19 的 UFW 检查）
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
