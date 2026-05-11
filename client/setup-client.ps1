@@ -173,7 +173,10 @@ Write-Info "配置 Kill Switch（VPN 断线保护）..."
 # 支持格式：IPv4:port、hostname:port、[IPv6]:port
 $configRaw = Get-Content $destConf -Raw
 $epMatch = [regex]::Match($configRaw, 'Endpoint\s*=\s*(\[.*?\]|[^\s:]+):(\d+)')
-$serverEndpointIP   = if ($epMatch.Success) { $epMatch.Groups[1].Value.Trim() } else { $null }
+$serverEndpointIP   = if ($epMatch.Success) {
+    # 去除 IPv6 地址的方括号（如 [2001:db8::1] → 2001:db8::1）
+    $epMatch.Groups[1].Value.Trim().Trim('[', ']')
+} else { $null }
 $serverEndpointPort = if ($epMatch.Success) { [int]$epMatch.Groups[2].Value }    else { 51820 }
 
 # 清除旧 Kill Switch 规则

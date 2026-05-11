@@ -9,6 +9,7 @@ set -euo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 pass() { echo -e "${GREEN}[PASS]${NC} $*"; }
 fail() { echo -e "${RED}[FAIL]${NC} $*"; FAILED=$((FAILED+1)); }
+warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 info() { echo -e "${CYAN}[INFO]${NC} $*"; }
 
 FAILED=0
@@ -97,8 +98,14 @@ SR=$(sysctl -n net.ipv4.conf.all.send_redirects 2>/dev/null || echo 1)
 
 # ── 10. 服务端公网 IP ─────────────────────────────────────────────────────────
 info "检查服务端出口 IP..."
-PUB_IP4=$(curl -s4 --max-time 5 https://api.ipify.org 2>/dev/null || echo "获取失败")
-PUB_IP6=$(curl -s6 --max-time 5 https://api6.ipify.org 2>/dev/null || echo "无 IPv6")
+# 并行获取 IPv4/IPv6（各自最多等 5 秒），减少总等待时间
+_TMP4=$(mktemp); _TMP6=$(mktemp)
+curl -s4 --max-time 5 https://api.ipify.org    > "$_TMP4" 2>/dev/null & _PID4=$!
+curl -s6 --max-time 5 https://api6.ipify.org   > "$_TMP6" 2>/dev/null & _PID6=$!
+wait "$_PID4" || true; wait "$_PID6" || true
+PUB_IP4=$(cat "$_TMP4" 2>/dev/null); [[ -z "$PUB_IP4" ]] && PUB_IP4="获取失败"
+PUB_IP6=$(cat "$_TMP6" 2>/dev/null); [[ -z "$PUB_IP6" ]] && PUB_IP6="无 IPv6"
+rm -f "$_TMP4" "$_TMP6"
 echo -e "  服务端 IPv4：${CYAN}${PUB_IP4}${NC}"
 echo -e "  服务端 IPv6：${CYAN}${PUB_IP6}${NC}"
 

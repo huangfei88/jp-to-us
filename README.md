@@ -179,4 +179,4 @@ Start-Service "WireGuardTunnel`$jp-to-us-vpn"
 2. **iptables-persistent**：若服务器重启后 NAT 规则丢失，运行
    `apt install iptables-persistent && netfilter-persistent save`
 3. **WebRTC**：浏览器 WebRTC 可能泄露本地 IP，建议安装 uBlock Origin 并在设置中勾选「防止 WebRTC 泄露本地 IP」。
-4. **VPN 断线保护**：Windows 可通过防火墙策略实现 Kill Switch，阻止 VPN 断线时流量走直连（高级配置，按需实施）。
+4. **VPN 断线保护（Kill Switch）**：`setup-client.ps1` 已自动配置 Windows 防火墙 Kill Switch——VPN 断线时所有出站流量将被立即阻断，防止流量暴露真实日本 IP。卸载时运行 `.\setup-client.ps1 -Uninstall` 会自动清除相关规则。
