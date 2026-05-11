@@ -24,6 +24,9 @@ WG_SUBNET_V6="fd10:cafe::/64"      # 隧道 IPv6 子网
 WG_SERVER_V6="fd10:cafe::1"        # 服务端隧道 IPv6
 WG_CLIENT_V6="fd10:cafe::2"        # 客户端隧道 IPv6
 KEY_DIR="/etc/wireguard/keys"
+# conntrack 哈希桶数 = nf_conntrack_max / 4（建议比例，平衡内存与查找性能）
+# 若修改 sysctl 中的 nf_conntrack_max，请同步调整此值
+CONNTRACK_HASHSIZE=131072
 
 # 自动检测出口网卡（排除 lo / wg*）
 PUB_IF=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
@@ -70,12 +73,30 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.ip_local_port_range = 10000 65535
 # TCP MTU 探测：防止跨太平洋链路上 PMTUD 黑洞导致 TCP 连接卡死（企业级必须）
 net.ipv4.tcp_mtu_probing = 1
-# socket 选项内存上限（配合大缓冲区使用）
-net.core.optmem_max = 65536
+# socket 选项内存上限：辅助数据（ancillary data / cmsg）的每个套接字内存上限。
+# 512 KB（524288 B）确保大缓冲区场景下 IP_PKTINFO、SO_TIMESTAMPING 等辅助选项
+# 不会因默认 20480 B 上限而被截断，与 64 MB rmem_max/wmem_max 配套使用。
+net.core.optmem_max = 524288
 # TCP Keepalive：加速检测死连接，避免NAT表和conntrack资源被僵尸连接占用
 net.ipv4.tcp_keepalive_time = 300
 net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
+# TIME_WAIT 状态超时（默认 60s），减少 conntrack 条目长期占用
+net.ipv4.tcp_fin_timeout = 30
+
+# ── conntrack（NAT VPN 连接跟踪表，防止满表丢包）──
+# 默认值通常为 65536–131072，全流量 NAT VPN 高并发时极易耗尽
+# 每条 conntrack 约占 300–400 字节；524288 条约需 ~200 MB
+net.netfilter.nf_conntrack_max = 524288
+# TCP established 超时：默认 432000s（5天），改为 3600s（1小时）
+# NAT 表中失活的长连接将在 1 小时内被回收，避免表溢出
+net.netfilter.nf_conntrack_tcp_timeout_established = 3600
+# TIME_WAIT/CLOSE_WAIT 加速回收
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
+# UDP 跟踪超时（默认 30s/180s）
+net.netfilter.nf_conntrack_udp_timeout = 30
+net.netfilter.nf_conntrack_udp_timeout_stream = 60
 
 # ── 路由安全 / 防 ICMP 劫持 ──
 net.ipv4.conf.all.rp_filter = 1
@@ -92,7 +113,17 @@ SYSCTL
 # 预加载 BBR 模块（如果可用）——必须在 sysctl -p 之前，否则在以模块形式编译 BBR 的内核上
 # sysctl -p 对 tcp_congestion_control = bbr 报 "Invalid argument"，set -e 会中断整个脚本
 modprobe tcp_bbr 2>/dev/null || true
+# 预加载 nf_conntrack 模块，确保 sysctl 中的 nf_conntrack_max 等参数可写
+modprobe nf_conntrack 2>/dev/null || true
 sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
+
+# 设置 conntrack 哈希桶数（建议值 = nf_conntrack_max / 4）
+# hashsize 仅可在模块加载后通过 sysfs 写入，不走 sysctl
+if [[ -f /sys/module/nf_conntrack/parameters/hashsize ]]; then
+    echo "${CONNTRACK_HASHSIZE}" > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
+fi
+# 持久化：模块加载时自动设置 hashsize（重启后仍生效）
+echo "options nf_conntrack hashsize=${CONNTRACK_HASHSIZE}" > /etc/modprobe.d/nf-conntrack.conf
 
 # 检查 BBR 是否真正生效
 if sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
@@ -195,8 +226,11 @@ if command -v ufw &>/dev/null; then
     sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
     ufw --force reload       > /dev/null
 fi
-iptables  -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
-ip6tables -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
+# 使用 -C 先检查规则是否存在，避免重复执行脚本时在 INPUT 链中叠加重复条目
+iptables  -C INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || \
+    iptables  -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
+ip6tables -C INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || \
+    ip6tables -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
 
 # 持久化防火墙规则（仅保存 INPUT 规则；FORWARD/NAT 由 PostUp/PostDown 动态管理）
 # 必须先停止 wg0：若 wg0 已在运行（二次安装），其 PostUp 规则已写入 iptables；

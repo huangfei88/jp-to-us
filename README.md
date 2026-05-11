@@ -140,6 +140,10 @@ bash verify/check-leak.sh
 | MTU | 1420 | WireGuard 推荐值，避免分片 |
 | PersistentKeepalive | 25 秒 | 穿越 NAT，保持连接稳定 |
 | qdisc | fq（BBR）/ fq_codel（降级） | 配合 BBR 使用公平队列；BBR 不可用时自动降级为 fq_codel（含 AQM，减少 bufferbloat）|
+| tcp_fin_timeout | 30 秒 | 默认 60s，加速 TIME_WAIT 回收，减少 conntrack 占用 |
+| conntrack 表大小 | 524288 条 | 防止全流量 NAT 下 conntrack 表溢出丢包（hashsize=131072）|
+| conntrack established 超时 | 3600 秒 | 默认 432000s（5天），缩短为 1 小时，加速失活连接回收 |
+| optmem_max | 524288 字节 | 与 64MB 套接字缓冲区匹配，防止辅助数据内存不足 |
 
 ---
 
@@ -179,4 +183,4 @@ Start-Service "WireGuardTunnel`$jp-to-us-vpn"
 2. **iptables-persistent**：若服务器重启后 NAT 规则丢失，运行
    `apt install iptables-persistent && netfilter-persistent save`
 3. **WebRTC**：浏览器 WebRTC 可能泄露本地 IP，建议安装 uBlock Origin 并在设置中勾选「防止 WebRTC 泄露本地 IP」。
-4. **VPN 断线保护（Kill Switch）**：`setup-client.ps1` 已自动配置 Windows 防火墙 Kill Switch——VPN 断线时所有出站流量将被立即阻断，防止流量暴露真实日本 IP。卸载时运行 `.\setup-client.ps1 -Uninstall` 会自动清除相关规则。
+4. **VPN 断线保护（Kill Switch）**：`setup-client.ps1` 已自动配置 Windows 防火墙 Kill Switch——VPN 断线时所有出站流量将被立即阻断，防止流量暴露真实日本 IP。以下流量已豁免：DHCP 更新（UDP 67，防止租约到期后失去 IP 导致 VPN 无法恢复）、NTP 时间同步（UDP 123，防止时钟漂移超过 180s 导致 WireGuard 握手失败）、链路本地地址（169.254.0.0/16、fe80::/10，保障邻居发现和 APIPA 正常工作）。卸载时运行 `.\setup-client.ps1 -Uninstall` 会自动清除相关规则。

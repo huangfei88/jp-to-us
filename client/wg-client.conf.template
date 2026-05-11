@@ -9,7 +9,7 @@ PrivateKey = <CLIENT_PRIVATE_KEY>
 Address    = 10.10.0.2/32, fd10:cafe::2/128
 MTU        = 1420
 
-# ── DNS 防泄露：全部走隧道到 Cloudflare + Google ────────────
+# ── DNS 防泄露：全部走隧道到 Cloudflare ─────────────────────────
 # 不使用系统 DNS，防止 DNS 请求绕过 VPN
 DNS        = 1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001
 

@@ -110,7 +110,9 @@ if ($smhnr -eq 1) {
 Write-Info "检查默认路由..."
 $defaultRoutes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Sort-Object RouteMetric
 $bestRoute = $defaultRoutes | Select-Object -First 1
-if ($bestRoute) {
+if ($null -eq $bestRoute) {
+    Write-Fail "未找到 IPv4 默认路由（0.0.0.0/0），网络可能未正确配置"
+} else {
     $routeAdapter = Get-NetAdapter -InterfaceIndex $bestRoute.InterfaceIndex -ErrorAction SilentlyContinue
     $routeIface = if ($null -ne $routeAdapter) { $routeAdapter.Name } else { "未知" }
     Write-Host "  默认路由出口网卡：$routeIface（指标：$($bestRoute.RouteMetric)）" -ForegroundColor Yellow
@@ -119,6 +121,26 @@ if ($bestRoute) {
     } else {
         Write-Fail "默认路由未走 WireGuard 隧道（走的是：$routeIface）"
     }
+}
+
+# ── 9. 检查 Kill Switch 防火墙规则 ────────────────────────────────────────────
+Write-Info "检查 Kill Switch 防火墙规则..."
+$ksBlock = Get-NetFirewallRule -Name "WG-KS-BlockOut"    -ErrorAction SilentlyContinue
+$ksAllow = Get-NetFirewallRule -Name "WG-KS-AllowTunnel" -ErrorAction SilentlyContinue
+$ksDhcp  = Get-NetFirewallRule -Name "WG-KS-AllowDHCP"   -ErrorAction SilentlyContinue
+$ksNtp   = Get-NetFirewallRule -Name "WG-KS-AllowNTP"    -ErrorAction SilentlyContinue
+if ($null -ne $ksBlock -and $ksBlock.Enabled -eq "True" `
+    -and $null -ne $ksAllow -and $ksAllow.Enabled -eq "True") {
+    $missing = @()
+    if ($null -eq $ksDhcp -or $ksDhcp.Enabled -ne "True") { $missing += "WG-KS-AllowDHCP（UDP 67）" }
+    if ($null -eq $ksNtp  -or $ksNtp.Enabled  -ne "True") { $missing += "WG-KS-AllowNTP（UDP 123）" }
+    if ($missing.Count -eq 0) {
+        Write-Pass "Kill Switch 规则完整（BlockOut + Tunnel Allow + DHCP/NTP 豁免均已启用）"
+    } else {
+        Write-Fail "Kill Switch 豁免规则缺失：$($missing -join '、')——DHCP 租约到期或时钟漂移可能导致 VPN 永久断线"
+    }
+} else {
+    Write-Fail "Kill Switch 未配置或已禁用（WG-KS-BlockOut / WG-KS-AllowTunnel 缺失）——VPN 断线时流量将直接通过日本 IP 出口"
 }
 
 # ── 结果汇总 ──────────────────────────────────────────────────────────────────
