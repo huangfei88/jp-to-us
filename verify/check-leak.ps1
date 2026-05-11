@@ -74,10 +74,17 @@ try {
 
 # ── 5. 检查 DNS 配置 ──────────────────────────────────────────────────────────
 Write-Info "检查 DNS 配置..."
-$allDns = Get-DnsClientServerAddress | Where-Object { $_.AddressFamily -eq 2 } |
-    Select-Object -ExpandProperty ServerAddresses | Sort-Object -Unique
+# Server 2022 Datacenter：排除 Hyper-V 虚拟适配器（其 DNS 由 VM 独立管理，
+# 不代表主机出口 DNS；将其 DNS 加入检查会导致 Azure/内部 DNS 服务器误报为泄露）
+$allDns = @(Get-NetAdapter | Where-Object {
+    $_.Status -eq "Up" -and
+    $_.InterfaceDescription -notlike "*Hyper-V*"
+} | ForEach-Object {
+    Get-DnsClientServerAddress -InterfaceAlias $_.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty ServerAddresses
+} | Where-Object { $_ } | Sort-Object -Unique)
 $expectedDns = @("1.1.1.1", "1.0.0.1")
-$dnsBad = $allDns | Where-Object { $_ -notin $expectedDns -and $_ -notlike $VPN_SUBNET_PREFIX -and $_ -ne "::1" }
+$dnsBad = $allDns | Where-Object { $_ -notin $expectedDns -and $_ -notlike $VPN_SUBNET_PREFIX }
 if ($dnsBad) {
     Write-Fail "存在非隧道 DNS 服务器：$($dnsBad -join ', ')（可能 DNS 泄露）"
 } else {
@@ -126,19 +133,26 @@ if ($null -eq $bestRoute) {
 
 # ── 9. 检查 Kill Switch 防火墙规则 ────────────────────────────────────────────
 Write-Info "检查 Kill Switch 防火墙规则..."
-$ksBlock = Get-NetFirewallRule -Name "WG-KS-BlockOut"    -ErrorAction SilentlyContinue
-$ksAllow = Get-NetFirewallRule -Name "WG-KS-AllowTunnel" -ErrorAction SilentlyContinue
-$ksDhcp  = Get-NetFirewallRule -Name "WG-KS-AllowDHCP"   -ErrorAction SilentlyContinue
-$ksNtp   = Get-NetFirewallRule -Name "WG-KS-AllowNTP"    -ErrorAction SilentlyContinue
+$ksBlock    = Get-NetFirewallRule -Name "WG-KS-BlockOut"               -ErrorAction SilentlyContinue
+$ksAllow    = Get-NetFirewallRule -Name "WG-KS-AllowTunnel"            -ErrorAction SilentlyContinue
+$ksDhcp     = Get-NetFirewallRule -Name "WG-KS-AllowDHCP"              -ErrorAction SilentlyContinue
+$ksNtp      = Get-NetFirewallRule -Name "WG-KS-AllowNTP"               -ErrorAction SilentlyContinue
+$ksEndpoint = Get-NetFirewallRule -Name "WG-KS-AllowEndpoint"          -ErrorAction SilentlyContinue
+$ksLocal    = Get-NetFirewallRule -Name "WG-KS-AllowLoopbackAndLinkLocal" -ErrorAction SilentlyContinue
 if ($null -ne $ksBlock -and $ksBlock.Enabled -eq "True" `
     -and $null -ne $ksAllow -and $ksAllow.Enabled -eq "True") {
     $missing = @()
-    if ($null -eq $ksDhcp -or $ksDhcp.Enabled -ne "True") { $missing += "WG-KS-AllowDHCP（UDP 67）" }
-    if ($null -eq $ksNtp  -or $ksNtp.Enabled  -ne "True") { $missing += "WG-KS-AllowNTP（UDP 123）" }
+    if ($null -eq $ksDhcp     -or $ksDhcp.Enabled     -ne "True") { $missing += "WG-KS-AllowDHCP（UDP 67）" }
+    if ($null -eq $ksNtp      -or $ksNtp.Enabled      -ne "True") { $missing += "WG-KS-AllowNTP（UDP 123）" }
+    # AllowEndpoint 是最关键豁免——若缺失，Kill Switch 会阻断 WireGuard UDP 握手包，
+    # VPN 断线后永远无法重连（握手被自己的防火墙拦截）
+    if ($null -eq $ksEndpoint -or $ksEndpoint.Enabled -ne "True") { $missing += "WG-KS-AllowEndpoint（VPN 握手 UDP，缺失将导致断线后无法重连）" }
+    # AllowLoopbackAndLinkLocal 保证邻居发现（NDP）、APIPA 正常工作
+    if ($null -eq $ksLocal    -or $ksLocal.Enabled    -ne "True") { $missing += "WG-KS-AllowLoopbackAndLinkLocal（回环/链路本地/NDP）" }
     if ($missing.Count -eq 0) {
-        Write-Pass "Kill Switch 规则完整（BlockOut + Tunnel Allow + DHCP/NTP 豁免均已启用）"
+        Write-Pass "Kill Switch 规则完整（BlockOut + Tunnel Allow + Endpoint/DHCP/NTP/链路本地豁免均已启用）"
     } else {
-        Write-Fail "Kill Switch 豁免规则缺失：$($missing -join '、')——DHCP 租约到期或时钟漂移可能导致 VPN 永久断线"
+        Write-Fail "Kill Switch 豁免规则缺失：$($missing -join '、')"
     }
 } else {
     Write-Fail "Kill Switch 未配置或已禁用（WG-KS-BlockOut / WG-KS-AllowTunnel 缺失）——VPN 断线时流量将直接通过日本 IP 出口"

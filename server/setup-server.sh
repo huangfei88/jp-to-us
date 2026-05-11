@@ -320,7 +320,7 @@ if command -v ufw &>/dev/null; then
     # DEFAULT_FORWARD_POLICY=ACCEPT 是 UFW 允许内核 FORWARD 链生效的前提（wg-quick PostUp 依赖此策略）
     sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' \
         /etc/default/ufw 2>/dev/null || true
-    ufw --force reload > /dev/null
+    ufw --force enable > /dev/null
     if ufw status 2>/dev/null | grep -q "Status: active"; then
         _UFW_ACTIVE=true
         info "UFW 已更新并重载，WireGuard 端口 ${WG_PORT}/udp 已开放 ✓"

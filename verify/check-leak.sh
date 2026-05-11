@@ -14,6 +14,7 @@ info() { echo -e "${CYAN}[INFO]${NC} $*"; }
 
 FAILED=0
 WG_IFACE="wg0"
+WG_PORT=51820
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
