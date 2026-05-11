@@ -142,8 +142,10 @@ fi
 # ── 12. 服务端公网 IP ─────────────────────────────────────────────────────────
 info "检查服务端出口 IP..."
 # 并行获取 IPv4/IPv6（各自最多等 5 秒），减少总等待时间
-_TMP4=$(mktemp); _TMP6=$(mktemp)
+# 先初始化变量再设 trap：防止第二个 mktemp 失败时 trap 引用未定义变量（set -u）
+_TMP4=""; _TMP6=""
 trap 'rm -f "$_TMP4" "$_TMP6" 2>/dev/null' EXIT INT TERM
+_TMP4=$(mktemp); _TMP6=$(mktemp)
 curl -s4 --max-time 5 https://api.ipify.org    > "$_TMP4" 2>/dev/null & _PID4=$!
 curl -s6 --max-time 5 https://api6.ipify.org   > "$_TMP6" 2>/dev/null & _PID6=$!
 wait "$_PID4" || true; wait "$_PID6" || true

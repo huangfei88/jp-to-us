@@ -224,7 +224,7 @@ if ($serverEndpointIP) {
 # 127.0.0.0/8：IPv4 回环；::1/128：IPv6 回环
 # 169.254.0.0/16：IPv4 链路本地（APIPA / DHCP 失败后备地址 + 部分云元数据）
 # fe80::/10：IPv6 链路本地（邻居发现 / NDP 必须）
-New-NetFirewallRule -Name "WG-KS-AllowLoopback" `
+New-NetFirewallRule -Name "WG-KS-AllowLoopbackAndLinkLocal" `
     -DisplayName "WireGuard KS: Allow Loopback and Link-Local" `
     -Direction Outbound -Action Allow `
     -RemoteAddress @("127.0.0.0/8", "::1/128", "169.254.0.0/16", "fe80::/10") `
