@@ -124,7 +124,7 @@ PostUp   = iptables -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m state --state RELA
 PostDown = iptables -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
 PostDown = iptables -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT
 
-# ── MTU：避免分片，适合日本到美国的大西洋链路 ────────────────
+# ── MTU：避免分片，适合日本到美国的太平洋链路 ────────────────
 MTU = 1420
 
 # ── 客户端 Peer ─────────────────────────────────────────────

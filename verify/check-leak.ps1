@@ -14,7 +14,8 @@ $FAILED = 0
 
 function Write-Pass { param($msg) Write-Host "[PASS] $msg" -ForegroundColor Green;  $script:PASSED++ }
 function Write-Fail { param($msg) Write-Host "[FAIL] $msg" -ForegroundColor Red;    $script:FAILED++ }
-function Write-Info { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Cyan }
+function Write-Info { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Cyan   }
+function Write-Warn { param($msg) Write-Host "[WARN] $msg" -ForegroundColor Yellow }
 
 Write-Host ""
 Write-Host "══════════════════════════════════════════════════════" -ForegroundColor White
