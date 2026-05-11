@@ -117,8 +117,8 @@ fi
 # ── 11. 服务端公网 IP ─────────────────────────────────────────────────────────
 info "检查服务端出口 IP..."
 # 并行获取 IPv4/IPv6（各自最多等 5 秒），减少总等待时间
-trap 'rm -f "$_TMP4" "$_TMP6" 2>/dev/null' EXIT INT TERM
 _TMP4=$(mktemp); _TMP6=$(mktemp)
+trap 'rm -f "$_TMP4" "$_TMP6" 2>/dev/null' EXIT INT TERM
 curl -s4 --max-time 5 https://api.ipify.org    > "$_TMP4" 2>/dev/null & _PID4=$!
 curl -s6 --max-time 5 https://api6.ipify.org   > "$_TMP6" 2>/dev/null & _PID6=$!
 wait "$_PID4" || true; wait "$_PID6" || true
@@ -128,7 +128,19 @@ rm -f "$_TMP4" "$_TMP6"
 echo -e "  服务端 IPv4：${CYAN}${PUB_IP4}${NC}"
 echo -e "  服务端 IPv6：${CYAN}${PUB_IP6}${NC}"
 
-# ── 12. WireGuard peer 状态 ───────────────────────────────────────────────────
+# ── 12. conntrack 连接跟踪表 ──────────────────────────────────────────────────
+info "检查 conntrack 连接跟踪表..."
+CT_MAX=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 0)
+CT_COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "N/A")
+if [[ "$CT_MAX" -ge 524288 ]]; then
+    pass "conntrack 表容量充足（max=${CT_MAX}，当前=${CT_COUNT}）"
+elif [[ "$CT_MAX" -gt 0 ]]; then
+    fail "conntrack 表容量不足（max=${CT_MAX}，当前=${CT_COUNT}）——高并发 NAT 下可能丢包"
+else
+    warn "无法读取 nf_conntrack_max（模块未加载或内核不支持）"
+fi
+
+# ── 13. WireGuard peer 状态 ───────────────────────────────────────────────────
 info "WireGuard 连接状态："
 wg show "$WG_IFACE" 2>/dev/null || fail "无法读取 wg show 输出"
 

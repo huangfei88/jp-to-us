@@ -70,12 +70,28 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.ip_local_port_range = 10000 65535
 # TCP MTU 探测：防止跨太平洋链路上 PMTUD 黑洞导致 TCP 连接卡死（企业级必须）
 net.ipv4.tcp_mtu_probing = 1
-# socket 选项内存上限（配合大缓冲区使用）
-net.core.optmem_max = 65536
+# socket 选项内存上限（必须与大缓冲区匹配，64 MB 缓冲区配套不能低于 524288）
+net.core.optmem_max = 524288
 # TCP Keepalive：加速检测死连接，避免NAT表和conntrack资源被僵尸连接占用
 net.ipv4.tcp_keepalive_time = 300
 net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
+# TIME_WAIT 状态超时（默认 60s），减少 conntrack 条目长期占用
+net.ipv4.tcp_fin_timeout = 30
+
+# ── conntrack（NAT VPN 连接跟踪表，防止满表丢包）──
+# 默认值通常为 65536–131072，全流量 NAT VPN 高并发时极易耗尽
+# 每条 conntrack 约占 300–400 字节；524288 条约需 ~200 MB
+net.netfilter.nf_conntrack_max = 524288
+# TCP established 超时：默认 432000s（5天），改为 3600s（1小时）
+# NAT 表中失活的长连接将在 1 小时内被回收，避免表溢出
+net.netfilter.nf_conntrack_tcp_timeout_established = 3600
+# TIME_WAIT/CLOSE_WAIT 加速回收
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
+# UDP 跟踪超时（默认 30s/180s）
+net.netfilter.nf_conntrack_udp_timeout = 30
+net.netfilter.nf_conntrack_udp_timeout_stream = 60
 
 # ── 路由安全 / 防 ICMP 劫持 ──
 net.ipv4.conf.all.rp_filter = 1
@@ -92,7 +108,17 @@ SYSCTL
 # 预加载 BBR 模块（如果可用）——必须在 sysctl -p 之前，否则在以模块形式编译 BBR 的内核上
 # sysctl -p 对 tcp_congestion_control = bbr 报 "Invalid argument"，set -e 会中断整个脚本
 modprobe tcp_bbr 2>/dev/null || true
+# 预加载 nf_conntrack 模块，确保 sysctl 中的 nf_conntrack_max 等参数可写
+modprobe nf_conntrack 2>/dev/null || true
 sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
+
+# 设置 conntrack 哈希桶数（建议值 = nf_conntrack_max / 4 = 131072）
+# hashsize 仅可在模块加载后通过 sysfs 写入，不走 sysctl
+if [[ -f /sys/module/nf_conntrack/parameters/hashsize ]]; then
+    echo 131072 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
+fi
+# 持久化：模块加载时自动设置 hashsize（重启后仍生效）
+echo 'options nf_conntrack hashsize=131072' > /etc/modprobe.d/nf-conntrack.conf
 
 # 检查 BBR 是否真正生效
 if sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
