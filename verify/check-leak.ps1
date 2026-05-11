@@ -117,7 +117,11 @@ if ($smhnr -eq 1) {
 # ── 8. 检查默认路由 ───────────────────────────────────────────────────────────
 Write-Info "检查默认路由..."
 $defaultRoutes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
-    Select-Object *, @{N='CombinedMetric'; E={[int]$_.RouteMetric + [int]$_.InterfaceMetric}} |
+    Select-Object *, @{N='CombinedMetric'; E={
+        # -as [int] 在值为 null 时返回 $null，[int]$null = 0，安全处理未初始化字段
+        ([int]($_.RouteMetric     -as [int])) +
+        ([int]($_.InterfaceMetric -as [int]))
+    }} |
     Sort-Object CombinedMetric
 $bestRoute = $defaultRoutes | Select-Object -First 1
 if ($null -eq $bestRoute) {
