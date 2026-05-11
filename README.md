@@ -162,10 +162,10 @@ sudo journalctl -u wg-quick@wg0 -f
 
 ```powershell
 # 停止 VPN
-Stop-Service "WireGuardTunnel$jp-to-us-vpn"
+Stop-Service  "WireGuardTunnel`$jp-to-us-vpn"
 
 # 启动 VPN
-Start-Service "WireGuardTunnel$jp-to-us-vpn"
+Start-Service "WireGuardTunnel`$jp-to-us-vpn"
 
 # 卸载
 .\client\setup-client.ps1 -Uninstall

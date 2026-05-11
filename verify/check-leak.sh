@@ -68,7 +68,7 @@ fi
 
 # ── 6. FORWARD 规则 ────────────────────────────────────────────────────────────
 info "检查 FORWARD 规则..."
-if iptables -L FORWARD -n 2>/dev/null | grep -q "${WG_IFACE}"; then
+if iptables -L FORWARD -n -v 2>/dev/null | grep -q "${WG_IFACE}"; then
     pass "FORWARD 链规则存在"
 else
     fail "FORWARD 链未找到 ${WG_IFACE} 相关规则"

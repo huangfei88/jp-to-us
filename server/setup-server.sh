@@ -33,8 +33,9 @@ info "检测到出口网卡：$PUB_IF"
 # ── 1. 安装依赖 ────────────────────────────────────────────────────────────────
 info "安装 WireGuard 及相关工具..."
 apt-get update -qq
-apt-get install -y wireguard wireguard-tools iptables iproute2 \
-    openssl curl resolvconf 2>/dev/null || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    wireguard wireguard-tools iptables iptables-persistent iproute2 \
+    openssl curl
 
 # ── 2. 内核参数优化（低延迟 + 高吞吐量） ────────────────────────────────────────
 info "优化内核网络参数..."
@@ -74,8 +75,22 @@ net.ipv4.conf.default.rp_filter = 1
 SYSCTL
 sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
 
+# 检查 BBR 模块是否可用（旧内核可能不支持）
+if modprobe tcp_bbr 2>/dev/null && sysctl -n net.ipv4.tcp_congestion_control | grep -q bbr; then
+    info "BBR 拥塞控制已加载 ✓"
+else
+    warn "BBR 模块不可用（内核版本可能过低），降级为 cubic"
+    sed -i 's/net.ipv4.tcp_congestion_control = bbr/net.ipv4.tcp_congestion_control = cubic/' \
+        /etc/sysctl.d/99-vpn-perf.conf
+    sed -i 's/net.core.default_qdisc = fq/net.core.default_qdisc = pfifo_fast/' \
+        /etc/sysctl.d/99-vpn-perf.conf
+    sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
+fi
+
 # ── 3. 生成密钥对 ──────────────────────────────────────────────────────────────
 info "生成服务端 / 客户端密钥对..."
+# 设置严格 umask，确保密钥文件创建时权限为 600
+umask 077
 mkdir -p "$KEY_DIR"
 chmod 700 "$KEY_DIR"
 
@@ -120,9 +135,13 @@ PostDown = ip6tables -t nat -D POSTROUTING -s ${WG_SUBNET_V6} -o ${PUB_IF} -j MA
 
 # ── 转发规则（入→出 / 出→入） ─────────────────────────────
 PostUp   = iptables -A FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
-PostUp   = iptables -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp   = iptables -A FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 PostDown = iptables -D FORWARD -i ${WG_IFACE} -o ${PUB_IF} -j ACCEPT
-PostDown = iptables -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostDown = iptables -D FORWARD -i ${PUB_IF} -o ${WG_IFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# ── MSS 钳制：防止跨 MTU 边界导致 TCP 连接卡住（企业级必须）──
+PostUp   = iptables -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # ── MTU：避免分片，适合日本到美国的太平洋链路 ────────────────
 MTU = 1420
@@ -147,6 +166,9 @@ if command -v ufw &>/dev/null; then
 fi
 iptables  -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
 ip6tables -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
+
+# 持久化防火墙规则（仅保存 INPUT 规则；FORWARD/NAT 由 PostUp/PostDown 动态管理）
+netfilter-persistent save > /dev/null 2>&1 || warn "netfilter-persistent save 失败，规则可能在重启后丢失"
 
 # ── 6. 启动并设置开机自启 ──────────────────────────────────────────────────────
 info "启动 WireGuard..."

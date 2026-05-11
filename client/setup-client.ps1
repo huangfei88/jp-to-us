@@ -37,6 +37,9 @@ if ($Uninstall) {
         Start-Sleep 2
         & $WG_EXE /uninstallmanagerservice 2>$null
     }
+    # 移除 Kill Switch 防火墙规则
+    Remove-NetFirewallRule -Name "WG-KS-*" -ErrorAction SilentlyContinue | Out-Null
+    Write-Info "Kill Switch 规则已清除。"
     Write-Info "卸载完成。"
     exit 0
 }
@@ -127,8 +130,9 @@ Write-Info "隧道服务运行中 ✓"
 # ═════════════════════════════════════════════════════════════════════════════
 
 # 4-a. 禁用其他网卡的 IPv6（防止 IPv6 绕过隧道）
+# 注意：使用隧道名称精确匹配，避免误禁 WireGuard 隧道适配器本身
 Write-Info "禁用非 WireGuard 网卡的 IPv6..."
-Get-NetAdapter | Where-Object { $_.Name -notlike "*WireGuard*" -and $_.Status -eq "Up" } | ForEach-Object {
+Get-NetAdapter | Where-Object { $_.Name -ne $WG_TUNNEL_NAME -and $_.Status -eq "Up" } | ForEach-Object {
     Disable-NetAdapterBinding -Name $_.Name -ComponentID "ms_tcpip6" -ErrorAction SilentlyContinue
     Write-Warn "  已禁用 $($_.Name) 的 IPv6"
 }
@@ -152,10 +156,50 @@ Set-ItemProperty -Path $policyPath -Name "DisableSmartNameResolution" -Value 1 -
 
 # 4-e. 强制路由：确保默认路由走 WireGuard 网卡
 Start-Sleep 2
-$wgAdapter = Get-NetAdapter | Where-Object { $_.Name -like "*$WG_TUNNEL_NAME*" -or $_.InterfaceDescription -like "*WireGuard*" }
+$wgAdapter = Get-NetAdapter | Where-Object { $_.Name -like "*$WG_TUNNEL_NAME*" -or $_.InterfaceDescription -like "*WireGuard*" } | Select-Object -First 1
 if ($wgAdapter) {
     Write-Info "WireGuard 网卡：$($wgAdapter.Name) — 接口指标已由 WireGuard 配置管理"
 }
+
+# 4-f. Kill Switch — VPN 断线时阻断所有流量（企业级安全）
+Write-Info "配置 Kill Switch（VPN 断线保护）..."
+
+# 解析服务端 Endpoint（用于允许建立/保持隧道的防火墙规则）
+$configRaw = Get-Content $destConf -Raw
+$epMatch = [regex]::Match($configRaw, 'Endpoint\s*=\s*([^\s:]+):(\d+)')
+$serverEndpointIP   = if ($epMatch.Success) { $epMatch.Groups[1].Value.Trim() } else { $null }
+$serverEndpointPort = if ($epMatch.Success) { [int]$epMatch.Groups[2].Value }    else { 51820 }
+
+# 清除旧 Kill Switch 规则
+Remove-NetFirewallRule -Name "WG-KS-*" -ErrorAction SilentlyContinue | Out-Null
+
+# 阻断所有出站流量（默认拒绝策略）
+New-NetFirewallRule -Name "WG-KS-BlockOut" `
+    -DisplayName "WireGuard KS: Block All Outbound" `
+    -Direction Outbound -Action Block -Profile Any -Enabled True | Out-Null
+
+# 允许通过 VPN 隧道接口出站（所有隧道内流量）
+New-NetFirewallRule -Name "WG-KS-AllowTunnel" `
+    -DisplayName "WireGuard KS: Allow VPN Tunnel Interface" `
+    -Direction Outbound -Action Allow `
+    -InterfaceAlias $WG_TUNNEL_NAME -Profile Any -Enabled True | Out-Null
+
+# 允许 UDP 到服务端 Endpoint（建立 / 保持 WireGuard 握手）
+if ($serverEndpointIP) {
+    New-NetFirewallRule -Name "WG-KS-AllowEndpoint" `
+        -DisplayName "WireGuard KS: Allow VPN Endpoint UDP" `
+        -Direction Outbound -Action Allow `
+        -Protocol UDP -RemoteAddress $serverEndpointIP -RemotePort $serverEndpointPort `
+        -Profile Any -Enabled True | Out-Null
+}
+
+# 允许本地回环（127.0.0.0/8）
+New-NetFirewallRule -Name "WG-KS-AllowLoopback" `
+    -DisplayName "WireGuard KS: Allow Loopback" `
+    -Direction Outbound -Action Allow `
+    -RemoteAddress "127.0.0.0/8" -Profile Any -Enabled True | Out-Null
+
+Write-Pass "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断）"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 5. 验证连接

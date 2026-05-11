@@ -30,7 +30,8 @@ $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
 if ($null -ne $svc -and $svc.Status -eq "Running") {
     Write-Pass "隧道服务运行正常：$svcName"
 } else {
-    Write-Fail "隧道服务未运行（状态：$($svc?.Status ?? '未安装')）"
+    $svcStatus = if ($null -ne $svc) { $svc.Status.ToString() } else { "未安装" }
+    Write-Fail "隧道服务未运行（状态：$svcStatus）"
 }
 
 # ── 2. 检查 WireGuard 网卡 ────────────────────────────────────────────────────
@@ -41,7 +42,8 @@ $wgAdapter = Get-NetAdapter | Where-Object {
 if ($wgAdapter -and $wgAdapter.Status -eq "Up") {
     Write-Pass "WireGuard 网卡正常：$($wgAdapter.Name)"
 } else {
-    Write-Fail "WireGuard 网卡未就绪（状态：$($wgAdapter?.Status ?? '未找到')）"
+    $wgStatus = if ($null -ne $wgAdapter) { $wgAdapter.Status.ToString() } else { "未找到" }
+    Write-Fail "WireGuard 网卡未就绪（状态：$wgStatus）"
 }
 
 # ── 3. 检查当前出口 IP ────────────────────────────────────────────────────────
@@ -59,12 +61,9 @@ Write-Info "检查 IPv6 泄露..."
 try {
     $ipv6 = (Invoke-RestMethod -Uri "https://api6.ipify.org?format=json" -TimeoutSec 5).ip
     Write-Host "  检测到 IPv6 出口：$ipv6" -ForegroundColor Yellow
-    # 如果 IPv6 走的是隧道（fd10:cafe::2 为隧道 IP），属于正常
-    if ($ipv6 -like "fd10:*" -or $ipv6 -like "10.10.*") {
-        Write-Pass "IPv6 经过隧道（隧道 IP：$ipv6）"
-    } else {
-        Write-Fail "IPv6 可能泄露（显示非隧道 IP：$ipv6）"
-    }
+    # 由于已禁用物理网卡 IPv6 且 AllowedIPs 包含 ::/0，IPv6 必然走隧道
+    # 此处显示的是服务器的公网 IPv6，请人工确认为美国 IP
+    Write-Warn "请确认上方 IPv6 为圣何塞服务器 IP（非日本 IP）"
 } catch {
     Write-Pass "无 IPv6 出口（IPv6 已禁用或完全走隧道，无泄露风险）"
 }
@@ -96,7 +95,8 @@ try {
 # ── 7. 检查 Smart Multi-Homed Name Resolution ─────────────────────────────────
 Write-Info "检查多宿主 DNS 设置..."
 $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
-$smhnr = (Get-ItemProperty -Path $policyPath -Name "DisableSmartNameResolution" -ErrorAction SilentlyContinue)?.DisableSmartNameResolution
+$policyProp = Get-ItemProperty -Path $policyPath -Name "DisableSmartNameResolution" -ErrorAction SilentlyContinue
+$smhnr = if ($null -ne $policyProp) { $policyProp.DisableSmartNameResolution } else { $null }
 if ($smhnr -eq 1) {
     Write-Pass "Smart Multi-Homed Name Resolution 已禁用"
 } else {
@@ -108,7 +108,8 @@ Write-Info "检查默认路由..."
 $defaultRoutes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Sort-Object RouteMetric
 $bestRoute = $defaultRoutes | Select-Object -First 1
 if ($bestRoute) {
-    $routeIface = (Get-NetAdapter -InterfaceIndex $bestRoute.InterfaceIndex -ErrorAction SilentlyContinue)?.Name
+    $routeAdapter = Get-NetAdapter -InterfaceIndex $bestRoute.InterfaceIndex -ErrorAction SilentlyContinue
+    $routeIface = if ($null -ne $routeAdapter) { $routeAdapter.Name } else { "未知" }
     Write-Host "  默认路由出口网卡：$routeIface（指标：$($bestRoute.RouteMetric)）" -ForegroundColor Yellow
     if ($routeIface -like "*WireGuard*" -or $routeIface -like "*$TUNNEL_NAME*") {
         Write-Pass "默认路由经过 WireGuard 隧道 ✓"
