@@ -82,6 +82,18 @@ else
     fail "IPv6 FORWARD 链未找到 ${WG_IFACE} 相关规则（客户端 IPv6 流量可能被静默丢弃）"
 fi
 
+info "检查 TCP MSS 钳制规则（TCPMSS）..."
+if iptables -L FORWARD -n -v 2>/dev/null | grep -q "TCPMSS"; then
+    pass "IPv4 TCPMSS 钳制规则存在（防跨 MTU 边界 TCP 连接卡死）"
+else
+    fail "IPv4 TCPMSS 钳制规则缺失（跨 MTU 边界的 TCP 连接可能随机卡住）"
+fi
+if ip6tables -L FORWARD -n -v 2>/dev/null | grep -q "TCPMSS"; then
+    pass "IPv6 TCPMSS 钳制规则存在"
+else
+    fail "IPv6 TCPMSS 钳制规则缺失"
+fi
+
 # ── 7. BBR 拥塞控制 ────────────────────────────────────────────────────────────
 info "检查 BBR 拥塞控制..."
 CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
@@ -102,6 +114,10 @@ info "检查 ICMP redirect 设置..."
 SR=$(sysctl -n net.ipv4.conf.all.send_redirects 2>/dev/null || echo 1)
 [[ "$SR" == "0" ]] && pass "ICMP 重定向发送已禁用（路由表安全）" \
                    || fail "ICMP 重定向发送未禁用（可能干扰客户端路由）"
+
+AR=$(sysctl -n net.ipv4.conf.all.accept_redirects 2>/dev/null || echo 1)
+[[ "$AR" == "0" ]] && pass "ICMP 重定向接受已禁用（防路由表被远程劫持）" \
+                   || fail "ICMP 重定向接受未禁用（路由可能被远程重定向攻击劫持）"
 
 # ── 10. TCP Keepalive ──────────────────────────────────────────────────────────
 info "检查 TCP Keepalive 参数..."

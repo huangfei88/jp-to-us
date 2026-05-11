@@ -226,8 +226,11 @@ if command -v ufw &>/dev/null; then
     sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
     ufw --force reload       > /dev/null
 fi
-iptables  -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
-ip6tables -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
+# 使用 -C 先检查规则是否存在，避免重复执行脚本时在 INPUT 链中叠加重复条目
+iptables  -C INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || \
+    iptables  -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
+ip6tables -C INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || \
+    ip6tables -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
 
 # 持久化防火墙规则（仅保存 INPUT 规则；FORWARD/NAT 由 PostUp/PostDown 动态管理）
 # 必须先停止 wg0：若 wg0 已在运行（二次安装），其 PostUp 规则已写入 iptables；
