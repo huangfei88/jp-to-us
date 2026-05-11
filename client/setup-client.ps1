@@ -220,13 +220,34 @@ if ($serverEndpointIP) {
         -Profile Any -Enabled True | Out-Null
 }
 
-# 允许本地回环（IPv4 127.0.0.0/8 + IPv6 ::1/128）
+# 允许本地回环 + 链路本地（防止 APIPA 和邻居发现失败）
+# 127.0.0.0/8：IPv4 回环；::1/128：IPv6 回环
+# 169.254.0.0/16：IPv4 链路本地（APIPA / DHCP 失败后备地址 + 部分云元数据）
+# fe80::/10：IPv6 链路本地（邻居发现 / NDP 必须）
 New-NetFirewallRule -Name "WG-KS-AllowLoopback" `
-    -DisplayName "WireGuard KS: Allow Loopback" `
+    -DisplayName "WireGuard KS: Allow Loopback and Link-Local" `
     -Direction Outbound -Action Allow `
-    -RemoteAddress @("127.0.0.0/8", "::1/128") -Profile Any -Enabled True | Out-Null
+    -RemoteAddress @("127.0.0.0/8", "::1/128", "169.254.0.0/16", "fe80::/10") `
+    -Profile Any -Enabled True | Out-Null
 
-Write-Info "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断）"
+# 允许 DHCP 更新（UDP dst 67 → 路由器/DHCP 服务器）
+# Kill Switch 若阻断 DHCP，租约到期后客户端丢失 IP，WireGuard 握手无法发送，VPN 无法恢复
+New-NetFirewallRule -Name "WG-KS-AllowDHCP" `
+    -DisplayName "WireGuard KS: Allow DHCP Renewal" `
+    -Direction Outbound -Action Allow `
+    -Protocol UDP -RemotePort 67 `
+    -Profile Any -Enabled True | Out-Null
+
+# 允许 NTP 时间同步（UDP dst 123）
+# WireGuard 握手的 replay protection 要求双端时钟偏差 < 180s；
+# 长期运行时若 NTP 被阻断，时钟漂移将导致握手失败，VPN 永久断线
+New-NetFirewallRule -Name "WG-KS-AllowNTP" `
+    -DisplayName "WireGuard KS: Allow NTP Time Sync" `
+    -Direction Outbound -Action Allow `
+    -Protocol UDP -RemotePort 123 `
+    -Profile Any -Enabled True | Out-Null
+
+Write-Info "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断；DHCP/NTP/链路本地已豁免）"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 5. 验证连接

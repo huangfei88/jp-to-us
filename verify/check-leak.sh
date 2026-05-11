@@ -114,7 +114,16 @@ else
     fail "TCP Keepalive 未调优（time=${KA_TIME} intvl=${KA_INTVL} probes=${KA_PROBES}）——僵尸连接最多占用 $((KA_TIME + KA_INTVL * KA_PROBES))s"
 fi
 
-# ── 11. 服务端公网 IP ─────────────────────────────────────────────────────────
+# ── 11. TCP FIN 超时 ────────────────────────────────────────────────────────────
+info "检查 TCP FIN 超时..."
+FIN_TO=$(sysctl -n net.ipv4.tcp_fin_timeout 2>/dev/null || echo 60)
+if [[ "$FIN_TO" -le 30 ]]; then
+    pass "TCP FIN 超时已调优（${FIN_TO}s，加速 TIME_WAIT 回收，减少 conntrack 压力）"
+else
+    fail "TCP FIN 超时未调优（当前 ${FIN_TO}s，建议 ≤ 30s）——TIME_WAIT 条目长期堆积，conntrack 表更快耗尽"
+fi
+
+# ── 12. 服务端公网 IP ─────────────────────────────────────────────────────────
 info "检查服务端出口 IP..."
 # 并行获取 IPv4/IPv6（各自最多等 5 秒），减少总等待时间
 _TMP4=$(mktemp); _TMP6=$(mktemp)
@@ -128,7 +137,7 @@ rm -f "$_TMP4" "$_TMP6"
 echo -e "  服务端 IPv4：${CYAN}${PUB_IP4}${NC}"
 echo -e "  服务端 IPv6：${CYAN}${PUB_IP6}${NC}"
 
-# ── 12. conntrack 连接跟踪表 ──────────────────────────────────────────────────
+# ── 13. conntrack 连接跟踪表 ──────────────────────────────────────────────────
 info "检查 conntrack 连接跟踪表..."
 CT_MAX=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 0)
 CT_COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "N/A")
@@ -140,7 +149,15 @@ else
     warn "无法读取 nf_conntrack_max（模块未加载或内核不支持）"
 fi
 
-# ── 13. WireGuard peer 状态 ───────────────────────────────────────────────────
+# conntrack established 超时（默认 432000s = 5天，必须缩短否则失活连接长期占表）
+CT_EST=$(sysctl -n net.netfilter.nf_conntrack_tcp_timeout_established 2>/dev/null || echo 432000)
+if [[ "$CT_EST" -le 3600 ]]; then
+    pass "conntrack established 超时已调优（${CT_EST}s，失活连接 1 小时内回收）"
+else
+    fail "conntrack established 超时过长（当前 ${CT_EST}s，默认 432000s/5天）——失活 TCP 连接长期占据 conntrack 表，高并发下快速耗尽"
+fi
+
+# ── 14. WireGuard peer 状态 ───────────────────────────────────────────────────
 info "WireGuard 连接状态："
 wg show "$WG_IFACE" 2>/dev/null || fail "无法读取 wg show 输出"
 
