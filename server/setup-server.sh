@@ -199,6 +199,10 @@ iptables  -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
 ip6tables -I INPUT -p udp --dport "${WG_PORT}" -j ACCEPT 2>/dev/null || true
 
 # 持久化防火墙规则（仅保存 INPUT 规则；FORWARD/NAT 由 PostUp/PostDown 动态管理）
+# 必须先停止 wg0：若 wg0 已在运行（二次安装），其 PostUp 规则已写入 iptables；
+# 若此时直接 save，这些规则会被持久化，重启后 netfilter-persistent 恢复一次，
+# wg-quick PostUp 再添加一次，造成 FORWARD/NAT 规则双重叠加，破坏 conntrack 和 NAT 正确性。
+wg-quick down "${WG_IFACE}" 2>/dev/null || true
 netfilter-persistent save > /dev/null 2>&1 || warn "netfilter-persistent save 失败，规则可能在重启后丢失"
 
 # ── 6. 启动并设置开机自启 ──────────────────────────────────────────────────────
