@@ -9,8 +9,8 @@
 #Requires -RunAsAdministrator
 
 $TUNNEL_NAME = "jp-to-us-vpn"
-$PASSED = 0
-$FAILED = 0
+$script:PASSED = 0
+$script:FAILED = 0
 
 function Write-Pass { param($msg) Write-Host "[PASS] $msg" -ForegroundColor Green;  $script:PASSED++ }
 function Write-Fail { param($msg) Write-Host "[FAIL] $msg" -ForegroundColor Red;    $script:FAILED++ }

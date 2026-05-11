@@ -199,7 +199,7 @@ New-NetFirewallRule -Name "WG-KS-AllowLoopback" `
     -Direction Outbound -Action Allow `
     -RemoteAddress "127.0.0.0/8" -Profile Any -Enabled True | Out-Null
 
-Write-Pass "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断）"
+Write-Info "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断）"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 5. 验证连接
