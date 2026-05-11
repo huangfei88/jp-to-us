@@ -320,10 +320,16 @@ if command -v ufw &>/dev/null; then
     # DEFAULT_FORWARD_POLICY=ACCEPT 是 UFW 允许内核 FORWARD 链生效的前提（wg-quick PostUp 依赖此策略）
     sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' \
         /etc/default/ufw 2>/dev/null || true
-    ufw --force enable > /dev/null
+    ufw --force enable  > /dev/null
+    # 必须显式 reload：若 UFW 在 enable 时已处于激活状态（常见情况），
+    # enable 是空操作，不会重新读取 /etc/default/ufw 中的 DEFAULT_FORWARD_POLICY。
+    # reload 确保新的 FORWARD 策略（ACCEPT）被加载到内核 FORWARD 链，
+    # 否则 wg-quick PostUp 追加（-A）的 FORWARD ACCEPT 规则会落在 UFW 的 DROP catchall
+    # 之后，VPN 流量转发被静默丢弃。
+    ufw --force reload  > /dev/null
     if ufw status 2>/dev/null | grep -q "Status: active"; then
         _UFW_ACTIVE=true
-        info "UFW 已更新并重载，WireGuard 端口 ${WG_PORT}/udp 已开放 ✓"
+        info "UFW 已启用并重载，WireGuard 端口 ${WG_PORT}/udp 已开放 ✓"
     fi
 fi
 
