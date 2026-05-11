@@ -1,0 +1,31 @@
+# ============================================================
+# WireGuard Server 配置模板 — San Jose Linux
+# 此文件由 setup-server.sh 自动生成，此处为参考模板
+# ============================================================
+
+[Interface]
+# 服务端隧道 IP（IPv4 + IPv6）
+Address    = 10.10.0.1/24, fd10:cafe::1/64
+ListenPort = 51820
+PrivateKey = <SERVER_PRIVATE_KEY>
+
+# ── 企业级 MTU（跨太平洋链路避免分片）──────────────────────
+MTU = 1420
+
+# ── NAT 出口（PostUp/PostDown 动态设置）────────────────────
+# 自动检测出口网卡，实际由 setup-server.sh 填入
+PostUp   = iptables  -t nat -A POSTROUTING -s 10.10.0.0/24  -o ETH0 -j MASQUERADE
+PostUp   = ip6tables -t nat -A POSTROUTING -s fd10:cafe::/64 -o ETH0 -j MASQUERADE
+PostUp   = iptables  -A FORWARD -i wg0 -o ETH0 -j ACCEPT
+PostUp   = iptables  -A FORWARD -i ETH0 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostDown = iptables  -t nat -D POSTROUTING -s 10.10.0.0/24  -o ETH0 -j MASQUERADE
+PostDown = ip6tables -t nat -D POSTROUTING -s fd10:cafe::/64 -o ETH0 -j MASQUERADE
+PostDown = iptables  -D FORWARD -i wg0 -o ETH0 -j ACCEPT
+PostDown = iptables  -D FORWARD -i ETH0 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# ── 客户端 Peer ─────────────────────────────────────────────
+[Peer]
+# Windows 大阪客户端
+PublicKey    = <CLIENT_PUBLIC_KEY>
+PresharedKey = <PRE_SHARED_KEY>
+AllowedIPs   = 10.10.0.2/32, fd10:cafe::2/128

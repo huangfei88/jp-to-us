@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# =============================================================================
+# 泄露检测脚本 — Linux 服务端
+# 检查：WireGuard 服务状态、NAT/转发规则、IPv4/IPv6 出口
+# 运行方式：bash verify/check-leak.sh
+# =============================================================================
+set -euo pipefail
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+pass() { echo -e "${GREEN}[PASS]${NC} $*"; }
+fail() { echo -e "${RED}[FAIL]${NC} $*"; FAILED=$((FAILED+1)); }
+info() { echo -e "${CYAN}[INFO]${NC} $*"; }
+
+FAILED=0
+WG_IFACE="wg0"
+
+echo ""
+echo "═══════════════════════════════════════════════════════"
+echo "  WireGuard 服务端泄露检测"
+echo "═══════════════════════════════════════════════════════"
+echo ""
+
+# ── 1. WireGuard 接口状态 ────────────────────────────────────────────────────
+info "检查 WireGuard 服务..."
+if systemctl is-active --quiet "wg-quick@${WG_IFACE}"; then
+    pass "wg-quick@${WG_IFACE} 服务运行正常"
+else
+    fail "wg-quick@${WG_IFACE} 服务未运行"
+fi
+
+# ── 2. 接口 IP ────────────────────────────────────────────────────────────────
+info "检查 ${WG_IFACE} 接口 IP..."
+WG_IP=$(ip addr show "$WG_IFACE" 2>/dev/null | grep "inet " | awk '{print $2}' || true)
+WG_IP6=$(ip addr show "$WG_IFACE" 2>/dev/null | grep "inet6 " | awk '{print $2}' | head -1 || true)
+if [[ -n "$WG_IP" ]]; then
+    pass "IPv4 隧道地址：${WG_IP}"
+else
+    fail "未检测到 IPv4 隧道地址"
+fi
+if [[ -n "$WG_IP6" ]]; then
+    pass "IPv6 隧道地址：${WG_IP6}"
+else
+    fail "未检测到 IPv6 隧道地址"
+fi
+
+# ── 3. IPv4 转发 ──────────────────────────────────────────────────────────────
+info "检查 IPv4 转发..."
+FWD4=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)
+[[ "$FWD4" == "1" ]] && pass "IPv4 转发已启用" || fail "IPv4 转发未启用（当前值：${FWD4}）"
+
+# ── 4. IPv6 转发 ──────────────────────────────────────────────────────────────
+info "检查 IPv6 转发..."
+FWD6=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo 0)
+[[ "$FWD6" == "1" ]] && pass "IPv6 转发已启用" || fail "IPv6 转发未启用（当前值：${FWD6}）"
+
+# ── 5. NAT MASQUERADE 规则 ────────────────────────────────────────────────────
+info "检查 iptables NAT 规则..."
+if iptables -t nat -L POSTROUTING -n 2>/dev/null | grep -q "MASQUERADE"; then
+    pass "IPv4 NAT MASQUERADE 规则存在"
+else
+    fail "IPv4 NAT MASQUERADE 规则缺失"
+fi
+if ip6tables -t nat -L POSTROUTING -n 2>/dev/null | grep -q "MASQUERADE"; then
+    pass "IPv6 NAT MASQUERADE 规则存在"
+else
+    fail "IPv6 NAT MASQUERADE 规则缺失（IPv6 可能泄露）"
+fi
+
+# ── 6. FORWARD 规则 ────────────────────────────────────────────────────────────
+info "检查 FORWARD 规则..."
+if iptables -L FORWARD -n 2>/dev/null | grep -q "${WG_IFACE}"; then
+    pass "FORWARD 链规则存在"
+else
+    fail "FORWARD 链未找到 ${WG_IFACE} 相关规则"
+fi
+
+# ── 7. BBR 拥塞控制 ────────────────────────────────────────────────────────────
+info "检查 BBR 拥塞控制..."
+CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+[[ "$CC" == "bbr" ]] && pass "BBR 已启用（高性能）" || fail "BBR 未启用（当前：${CC}）"
+
+# ── 8. 服务端公网 IP ──────────────────────────────────────────────────────────
+info "检查服务端出口 IP..."
+PUB_IP4=$(curl -s4 --max-time 5 https://api.ipify.org 2>/dev/null || echo "获取失败")
+PUB_IP6=$(curl -s6 --max-time 5 https://api6.ipify.org 2>/dev/null || echo "无 IPv6")
+echo -e "  服务端 IPv4：${CYAN}${PUB_IP4}${NC}"
+echo -e "  服务端 IPv6：${CYAN}${PUB_IP6}${NC}"
+
+# ── 9. WireGuard peer 状态 ────────────────────────────────────────────────────
+info "WireGuard 连接状态："
+wg show "$WG_IFACE" 2>/dev/null || fail "无法读取 wg show 输出"
+
+# ── 结果汇总 ──────────────────────────────────────────────────────────────────
+echo ""
+echo "═══════════════════════════════════════════════════════"
+if [[ $FAILED -eq 0 ]]; then
+    echo -e "${GREEN}  所有检测通过 ✓  服务端配置正确${NC}"
+else
+    echo -e "${RED}  检测失败项：${FAILED}  请根据 [FAIL] 提示修复${NC}"
+fi
+echo "═══════════════════════════════════════════════════════"
+echo ""
