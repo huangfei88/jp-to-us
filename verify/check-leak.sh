@@ -14,7 +14,7 @@ info() { echo -e "${CYAN}[INFO]${NC} $*"; }
 
 FAILED=0
 WG_IFACE="wg0"
-WG_PORT=51820
+WG_PORT=51820  # 必须与 setup-server.sh 中的 WG_PORT 保持一致（默认 51820）
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
