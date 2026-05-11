@@ -55,7 +55,12 @@ if (-not (Test-Path $WG_EXE)) {
     $wgUrl = "https://download.wireguard.com/windows-client/wireguard-installer.exe"
 
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        # 启用 TLS 1.2 + TLS 1.3（TLS 1.3 在 .NET 4.8 / PowerShell 7+ 上可用）
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls13 -bor [Net.SecurityProtocolType]::Tls12
+        } catch {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        }
         Invoke-WebRequest -Uri $wgUrl -OutFile $wgInstaller -UseBasicParsing -TimeoutSec 60
     } catch {
         Write-Err "下载失败：$_"
@@ -165,8 +170,9 @@ if ($wgAdapter) {
 Write-Info "配置 Kill Switch（VPN 断线保护）..."
 
 # 解析服务端 Endpoint（用于允许建立/保持隧道的防火墙规则）
+# 支持格式：IPv4:port、hostname:port、[IPv6]:port
 $configRaw = Get-Content $destConf -Raw
-$epMatch = [regex]::Match($configRaw, 'Endpoint\s*=\s*([^\s:]+):(\d+)')
+$epMatch = [regex]::Match($configRaw, 'Endpoint\s*=\s*(\[.*?\]|[^\s:]+):(\d+)')
 $serverEndpointIP   = if ($epMatch.Success) { $epMatch.Groups[1].Value.Trim() } else { $null }
 $serverEndpointPort = if ($epMatch.Success) { [int]$epMatch.Groups[2].Value }    else { 51820 }
 

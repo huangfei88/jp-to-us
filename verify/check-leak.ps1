@@ -12,6 +12,9 @@ $TUNNEL_NAME = "jp-to-us-vpn"
 $script:PASSED = 0
 $script:FAILED = 0
 
+# VPN 子网前缀（与 server/setup-server.sh 中的 WG_SUBNET_V4 一致）
+$VPN_SUBNET_PREFIX = "10.10.*"
+
 function Write-Pass { param($msg) Write-Host "[PASS] $msg" -ForegroundColor Green;  $script:PASSED++ }
 function Write-Fail { param($msg) Write-Host "[FAIL] $msg" -ForegroundColor Red;    $script:FAILED++ }
 function Write-Info { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Cyan   }
@@ -73,7 +76,7 @@ Write-Info "检查 DNS 配置..."
 $allDns = Get-DnsClientServerAddress | Where-Object { $_.AddressFamily -eq 2 } |
     Select-Object -ExpandProperty ServerAddresses | Sort-Object -Unique
 $expectedDns = @("1.1.1.1", "1.0.0.1")
-$dnsBad = $allDns | Where-Object { $_ -notin $expectedDns -and $_ -notlike "10.10.*" -and $_ -ne "::1" }
+$dnsBad = $allDns | Where-Object { $_ -notin $expectedDns -and $_ -notlike $VPN_SUBNET_PREFIX -and $_ -ne "::1" }
 if ($dnsBad) {
     Write-Fail "存在非隧道 DNS 服务器：$($dnsBad -join ', ')（可能 DNS 泄露）"
 } else {

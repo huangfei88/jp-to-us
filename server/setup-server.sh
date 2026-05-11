@@ -89,7 +89,8 @@ fi
 
 # ── 3. 生成密钥对 ──────────────────────────────────────────────────────────────
 info "生成服务端 / 客户端密钥对..."
-# 设置严格 umask，确保密钥文件创建时权限为 600
+# 保存当前 umask 并设置严格权限（仅影响本段密钥生成，之后立即恢复）
+_OLD_UMASK=$(umask)
 umask 077
 mkdir -p "$KEY_DIR"
 chmod 700 "$KEY_DIR"
@@ -115,6 +116,9 @@ SERVER_PUB=$(cat  "$KEY_DIR/server.pub")
 CLIENT_PRIV=$(cat "$KEY_DIR/client.key")
 CLIENT_PUB=$(cat  "$KEY_DIR/client.pub")
 PSK=$(cat         "$KEY_DIR/psk.key")
+
+# 恢复原始 umask（密钥生成完毕）
+umask "$_OLD_UMASK"
 
 # ── 4. 写入服务端 wg0.conf ──────────────────────────────────────────────────────
 info "生成 /etc/wireguard/wg0.conf ..."
