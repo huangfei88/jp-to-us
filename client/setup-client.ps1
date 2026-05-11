@@ -1,0 +1,263 @@
+<#
+.SYNOPSIS
+    WireGuard 全流量 VPN 客户端安装脚本 — Osaka Windows
+    将 Windows 所有网络流量路由通过圣何塞 Linux 服务器出口
+.DESCRIPTION
+    - 自动下载并安装 WireGuard for Windows
+    - 导入客户端配置（全隧道 + DNS 防泄露）
+    - 调整 Windows 网络设置防止各类泄露（WebRTC / IPv6 / DNS）
+    - 需要以管理员权限运行
+.NOTES
+    使用前请先将 wg-client.conf 放到与本脚本相同目录，
+    或通过 -ConfigFile 参数指定路径
+#>
+
+#Requires -RunAsAdministrator
+
+param(
+    [string]$ConfigFile = "$PSScriptRoot\wg-client.conf",
+    [switch]$Uninstall
+)
+
+# ── 颜色输出 ──────────────────────────────────────────────────────────────────
+function Write-Info  { param($msg) Write-Host "[INFO]  $msg" -ForegroundColor Green  }
+function Write-Warn  { param($msg) Write-Host "[WARN]  $msg" -ForegroundColor Yellow }
+function Write-Err   { param($msg) Write-Host "[ERROR] $msg" -ForegroundColor Red; exit 1 }
+
+$WG_TUNNEL_NAME = "jp-to-us-vpn"
+$WG_INSTALL_DIR = "$env:ProgramFiles\WireGuard"
+$WG_EXE         = "$WG_INSTALL_DIR\wireguard.exe"
+$WG_CONF_DIR    = "$env:ProgramData\WireGuard"
+
+# ── 卸载模式 ──────────────────────────────────────────────────────────────────
+if ($Uninstall) {
+    Write-Info "停止并移除 WireGuard 隧道..."
+    if (Test-Path $WG_EXE) {
+        & $WG_EXE /uninstalltunnelservice $WG_TUNNEL_NAME 2>$null
+        Start-Sleep 2
+        & $WG_EXE /uninstallmanagerservice 2>$null
+    }
+    # 移除 Kill Switch 防火墙规则
+    Remove-NetFirewallRule -Name "WG-KS-*" -ErrorAction SilentlyContinue | Out-Null
+    Write-Info "Kill Switch 规则已清除。"
+    Write-Info "卸载完成。"
+    exit 0
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 1. 安装 WireGuard for Windows
+# ═════════════════════════════════════════════════════════════════════════════
+Write-Info "检查 WireGuard 安装状态..."
+
+if (-not (Test-Path $WG_EXE)) {
+    Write-Info "下载 WireGuard for Windows..."
+    $wgInstaller = "$env:TEMP\wireguard-installer.exe"
+    $wgUrl = "https://download.wireguard.com/windows-client/wireguard-installer.exe"
+
+    try {
+        # 启用 TLS 1.2 + TLS 1.3（TLS 1.3 在 .NET 4.8 / PowerShell 7+ 上可用）
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls13 -bor [Net.SecurityProtocolType]::Tls12
+        } catch {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        }
+        Invoke-WebRequest -Uri $wgUrl -OutFile $wgInstaller -UseBasicParsing -TimeoutSec 60
+    } catch {
+        Write-Err "下载失败：$_"
+    }
+
+    Write-Info "安装 WireGuard（静默模式）..."
+    Start-Process -FilePath $wgInstaller -ArgumentList "/S" -Wait
+    Remove-Item $wgInstaller -Force -ErrorAction SilentlyContinue
+
+    if (-not (Test-Path $WG_EXE)) {
+        Write-Err "WireGuard 安装失败，请手动安装：https://www.wireguard.com/install/"
+    }
+}
+Write-Info "WireGuard 已安装：$WG_EXE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 2. 检查并复制配置文件
+# ═════════════════════════════════════════════════════════════════════════════
+if (-not (Test-Path $ConfigFile)) {
+    Write-Err "未找到配置文件：$ConfigFile`n请先将服务端生成的 wg-client.conf 放到同目录"
+}
+
+New-Item -ItemType Directory -Force -Path $WG_CONF_DIR | Out-Null
+$destConf = "$WG_CONF_DIR\$WG_TUNNEL_NAME.conf"
+Copy-Item -Path $ConfigFile -Destination $destConf -Force
+# 保护配置文件权限（仅 SYSTEM 和 Administrators 可读）
+$acl = Get-Acl $destConf
+$acl.SetAccessRuleProtection($true, $false)
+$acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
+foreach ($id in @("SYSTEM","Administrators")) {
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $id, "FullControl", "Allow")
+    $acl.AddAccessRule($rule)
+}
+Set-Acl -Path $destConf -AclObject $acl
+Write-Info "配置文件已复制到 $destConf"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 3. 安装并启动 WireGuard 隧道服务
+# ═════════════════════════════════════════════════════════════════════════════
+Write-Info "安装 WireGuard 隧道服务：$WG_TUNNEL_NAME"
+
+# 先停止旧实例（如果存在）
+& $WG_EXE /uninstalltunnelservice $WG_TUNNEL_NAME 2>$null
+Start-Sleep 1
+
+& $WG_EXE /installtunnelservice $destConf
+Start-Sleep 3
+
+$svcName = "WireGuardTunnel`$$WG_TUNNEL_NAME"
+$svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+if ($null -eq $svc) {
+    Write-Err "隧道服务未注册，请检查配置文件格式"
+}
+
+# 设置服务自动启动
+Set-Service -Name $svcName -StartupType Automatic
+
+# 启动服务
+if ($svc.Status -ne "Running") {
+    Start-Service -Name $svcName
+    Start-Sleep 3
+}
+$svc = Get-Service -Name $svcName
+if ($svc.Status -ne "Running") {
+    Write-Err "隧道服务启动失败：$($svc.Status)"
+}
+Write-Info "隧道服务运行中 ✓"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 4. 防泄露强化
+# ═════════════════════════════════════════════════════════════════════════════
+
+# 4-a. 禁用其他网卡的 IPv6（防止 IPv6 绕过隧道）
+# 注意：同时排除名称含隧道名和描述含 WireGuard 的适配器，避免误禁隧道接口本身
+Write-Info "禁用非 WireGuard 网卡的 IPv6..."
+Get-NetAdapter | Where-Object {
+    $_.Name -notlike "*$WG_TUNNEL_NAME*" -and
+    $_.InterfaceDescription -notlike "*WireGuard*" -and
+    $_.Status -eq "Up"
+} | ForEach-Object {
+    Disable-NetAdapterBinding -Name $_.Name -ComponentID "ms_tcpip6" -ErrorAction SilentlyContinue
+    Write-Warn "  已禁用 $($_.Name) 的 IPv6"
+}
+
+# 4-b. 强制 DNS 设置（覆盖所有非 VPN 网卡，防止 DNS 泄露）
+Write-Info "锁定所有网卡 DNS 到隧道 DNS..."
+$vpnDns = @("1.1.1.1", "1.0.0.1")
+Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | ForEach-Object {
+    Set-DnsClientServerAddress -InterfaceAlias $_.Name -ServerAddresses $vpnDns -ErrorAction SilentlyContinue
+}
+
+# 4-c. 禁用 DNS 多播（防止 mDNS 泄露本地 IP）
+Write-Info "禁用 DNS 多播..."
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" `
+    -Name "EnableMulticast" -Value 0 -Type DWord -Force
+
+# 4-d. 禁用 Windows Smart Multi-Homed Name Resolution（防止 DNS 走多网卡）
+$policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
+if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force | Out-Null }
+Set-ItemProperty -Path $policyPath -Name "DisableSmartNameResolution" -Value 1 -Type DWord -Force
+
+# 4-e. 强制路由：确保默认路由走 WireGuard 网卡
+Start-Sleep 2
+$wgAdapter = Get-NetAdapter | Where-Object { $_.Name -like "*$WG_TUNNEL_NAME*" -or $_.InterfaceDescription -like "*WireGuard*" } | Select-Object -First 1
+if ($wgAdapter) {
+    Write-Info "WireGuard 网卡：$($wgAdapter.Name) — 接口指标已由 WireGuard 配置管理"
+}
+
+# 4-f. Kill Switch — VPN 断线时阻断所有流量（企业级安全）
+Write-Info "配置 Kill Switch（VPN 断线保护）..."
+
+# 解析服务端 Endpoint（用于允许建立/保持隧道的防火墙规则）
+# 支持格式：IPv4:port、hostname:port、[IPv6]:port
+$configRaw = Get-Content $destConf -Raw
+$epMatch = [regex]::Match($configRaw, 'Endpoint\s*=\s*(\[.*?\]|[^\s:]+):(\d+)')
+$serverEndpointIP   = if ($epMatch.Success) {
+    # 去除 IPv6 地址的方括号（如 [2001:db8::1] → 2001:db8::1）
+    $raw = $epMatch.Groups[1].Value.Trim().Trim('[', ']')
+    # 若 Endpoint 是主机名而非 IP，解析为 IPv4 地址（防火墙规则不支持主机名）
+    if ($raw -match '^[\d.]+$' -or $raw -match '^[0-9a-fA-F:]+$') {
+        $raw
+    } else {
+        try {
+            $resolved = [System.Net.Dns]::GetHostAddresses($raw) |
+                Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+                Select-Object -ExpandProperty IPAddressToString -First 1
+            if ($resolved) { $resolved } else { $raw }
+        } catch {
+            Write-Warn "无法解析 Endpoint 主机名 '$raw' 为 IP 地址。Windows 防火墙不支持主机名作为 RemoteAddress，Kill Switch 将无法正确阻止 VPN 断线时的流量，真实 IP 可能泄露。请将配置文件中 Endpoint 改为 IP 地址后重新运行安装脚本。"
+            $raw
+        }
+    }
+} else { $null }
+$serverEndpointPort = if ($epMatch.Success) { [int]$epMatch.Groups[2].Value }    else { 51820 }
+
+# 清除旧 Kill Switch 规则
+Remove-NetFirewallRule -Name "WG-KS-*" -ErrorAction SilentlyContinue | Out-Null
+
+# 阻断所有出站流量（默认拒绝策略）
+New-NetFirewallRule -Name "WG-KS-BlockOut" `
+    -DisplayName "WireGuard KS: Block All Outbound" `
+    -Direction Outbound -Action Block -Profile Any -Enabled True | Out-Null
+
+# 允许通过 VPN 隧道接口出站（所有隧道内流量）
+New-NetFirewallRule -Name "WG-KS-AllowTunnel" `
+    -DisplayName "WireGuard KS: Allow VPN Tunnel Interface" `
+    -Direction Outbound -Action Allow `
+    -InterfaceAlias $WG_TUNNEL_NAME -Profile Any -Enabled True | Out-Null
+
+# 允许 UDP 到服务端 Endpoint（建立 / 保持 WireGuard 握手）
+if ($serverEndpointIP) {
+    New-NetFirewallRule -Name "WG-KS-AllowEndpoint" `
+        -DisplayName "WireGuard KS: Allow VPN Endpoint UDP" `
+        -Direction Outbound -Action Allow `
+        -Protocol UDP -RemoteAddress $serverEndpointIP -RemotePort $serverEndpointPort `
+        -Profile Any -Enabled True | Out-Null
+}
+
+# 允许本地回环（IPv4 127.0.0.0/8 + IPv6 ::1/128）
+New-NetFirewallRule -Name "WG-KS-AllowLoopback" `
+    -DisplayName "WireGuard KS: Allow Loopback" `
+    -Direction Outbound -Action Allow `
+    -RemoteAddress @("127.0.0.0/8", "::1/128") -Profile Any -Enabled True | Out-Null
+
+Write-Info "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断）"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 5. 验证连接
+# ═════════════════════════════════════════════════════════════════════════════
+Write-Info "等待隧道就绪..."
+Start-Sleep 5
+
+Write-Info "检查当前出口 IP..."
+try {
+    $currentIP = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json" -TimeoutSec 10).ip
+    Write-Host ""
+    Write-Host "  当前出口 IP：$currentIP" -ForegroundColor Cyan
+    Write-Host "  请访问 https://ipleak.net 确认显示为美国（圣何塞）IP" -ForegroundColor Cyan
+    Write-Host ""
+} catch {
+    Write-Warn "无法检测出口 IP（可能隧道还未完全就绪），请手动访问 https://ip.me"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "════════════════════════════════════════" -ForegroundColor Green
+Write-Host " WireGuard 全流量 VPN 配置完成！        " -ForegroundColor Green
+Write-Host "════════════════════════════════════════" -ForegroundColor Green
+Write-Host ""
+Write-Host "验证步骤：" -ForegroundColor Yellow
+Write-Host "  1. 访问 https://ipleak.net      — 确认 IP/DNS 均显示美国"
+Write-Host "  2. 访问 https://dnsleaktest.com  — 点击 Extended Test"
+Write-Host "  3. 访问 https://ipv6leak.com     — 确认无 IPv6 泄露"
+Write-Host "  4. 运行 verify\check-leak.ps1    — 自动化检测"
+Write-Host ""
+Write-Host "管理命令：" -ForegroundColor Yellow
+Write-Host "  停止 VPN：Stop-Service  'WireGuardTunnel`$$WG_TUNNEL_NAME'"
+Write-Host "  启动 VPN：Start-Service 'WireGuardTunnel`$$WG_TUNNEL_NAME'"
+Write-Host "  卸载 VPN：.\setup-client.ps1 -Uninstall"

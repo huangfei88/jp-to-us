@@ -1,0 +1,26 @@
+# ============================================================
+# WireGuard Client 配置模板 — Osaka Windows
+# 将此文件导入 WireGuard Windows 客户端，或由 setup-client.ps1 自动处理
+# ============================================================
+
+[Interface]
+# 客户端隧道 IP
+PrivateKey = <CLIENT_PRIVATE_KEY>
+Address    = 10.10.0.2/32, fd10:cafe::2/128
+MTU        = 1420
+
+# ── DNS 防泄露：全部走隧道到 Cloudflare + Google ────────────
+# 不使用系统 DNS，防止 DNS 请求绕过 VPN
+DNS        = 1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001
+
+[Peer]
+# 圣何塞 Linux 服务端
+PublicKey    = <SERVER_PUBLIC_KEY>
+PresharedKey = <PRE_SHARED_KEY>
+Endpoint     = <SERVER_PUBLIC_IP>:51820
+
+# ── 全隧道：所有 IPv4 + IPv6 流量走 VPN ──────────────────────
+AllowedIPs   = 0.0.0.0/0, ::/0
+
+# ── NAT 保活（防止 NAT 超时断线）────────────────────────────
+PersistentKeepalive = 25
