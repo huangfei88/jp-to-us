@@ -98,7 +98,7 @@ else
     warn "BBR 模块不可用（内核版本可能过低），降级为 cubic"
     sed -i 's/net.ipv4.tcp_congestion_control = bbr/net.ipv4.tcp_congestion_control = cubic/' \
         /etc/sysctl.d/99-vpn-perf.conf
-    sed -i 's/net.core.default_qdisc = fq/net.core.default_qdisc = fq_codel/' \
+    sed -i 's/net.core.default_qdisc = fq$/net.core.default_qdisc = fq_codel/' \
         /etc/sysctl.d/99-vpn-perf.conf
     sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
 fi

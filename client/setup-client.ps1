@@ -175,7 +175,18 @@ $configRaw = Get-Content $destConf -Raw
 $epMatch = [regex]::Match($configRaw, 'Endpoint\s*=\s*(\[.*?\]|[^\s:]+):(\d+)')
 $serverEndpointIP   = if ($epMatch.Success) {
     # 去除 IPv6 地址的方括号（如 [2001:db8::1] → 2001:db8::1）
-    $epMatch.Groups[1].Value.Trim().Trim('[', ']')
+    $raw = $epMatch.Groups[1].Value.Trim().Trim('[', ']')
+    # 若 Endpoint 是主机名而非 IP，解析为 IPv4 地址（防火墙规则不支持主机名）
+    if ($raw -match '^[\d.]+$' -or $raw -match '^[0-9a-fA-F:]+$') {
+        $raw
+    } else {
+        try {
+            $resolved = [System.Net.Dns]::GetHostAddresses($raw) |
+                Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+                Select-Object -ExpandProperty IPAddressToString -First 1
+            if ($resolved) { $resolved } else { $raw }
+        } catch { $raw }
+    }
 } else { $null }
 $serverEndpointPort = if ($epMatch.Success) { [int]$epMatch.Groups[2].Value }    else { 51820 }
 
