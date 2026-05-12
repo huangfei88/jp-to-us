@@ -281,8 +281,10 @@ fi
 # 第三个 keepalive（t=75）仍需在超时前到达以维持 NAT 映射。
 # 推荐值 120s（4.8×）在充足安全边际与 conntrack 内存占用之间取得平衡。
 CT_UDP_STREAM=$(sysctl -n net.netfilter.nf_conntrack_udp_timeout_stream 2>/dev/null || echo 30)
-if [[ "$CT_UDP_STREAM" -ge 60 ]]; then
-    pass "conntrack udp_timeout_stream 已调优（${CT_UDP_STREAM}s ≥ 60s，WireGuard keepalive=25s 的 2.4 倍以上安全边际；推荐值 120s）"
+if [[ "$CT_UDP_STREAM" -ge 120 ]]; then
+    pass "conntrack udp_timeout_stream 已调优（${CT_UDP_STREAM}s ≥ 120s 推荐值，keepalive=25s 的 4.8× 安全边际）"
+elif [[ "$CT_UDP_STREAM" -ge 60 ]]; then
+    warn "conntrack udp_timeout_stream 偏低（当前 ${CT_UDP_STREAM}s，推荐 ≥ 120s）——当前值仅约 2.4× keepalive，跨太平洋链路两次连续 keepalive 丢包时 NAT 映射有消失风险；请重新运行 setup-server.sh 修复"
 else
     fail "conntrack udp_timeout_stream 过短（当前 ${CT_UDP_STREAM}s，推荐 120s / 最低 60s）——跨太平洋链路 keepalive 丢包时 NAT 映射可能提前消失，隧道返回包被单方向丢弃"
 fi
@@ -305,10 +307,12 @@ fi
 # ── 15c. conntrack hashsize（查找性能）────────────────────────────────────────
 info "检查 conntrack hashsize（哈希桶数量）..."
 CT_HASH=$(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo 0)
-if [[ "$CT_HASH" -ge 131072 ]]; then
-    pass "conntrack hashsize 已调优（${CT_HASH} = nf_conntrack_max/4，O(1) 查找性能）"
+# 期望值 = nf_conntrack_max / 4（建议比例），动态计算以跟随 CT_MAX 变化
+EXPECTED_HASH=$(( CT_MAX > 0 ? CT_MAX / 4 : 131072 ))
+if [[ "$CT_HASH" -ge "$EXPECTED_HASH" ]]; then
+    pass "conntrack hashsize 已调优（${CT_HASH} ≥ nf_conntrack_max/4=${EXPECTED_HASH}，O(1) 查找性能）"
 elif [[ "$CT_HASH" -gt 0 ]]; then
-    warn "conntrack hashsize 偏低（当前 ${CT_HASH}，建议 ≥ 131072 = nf_conntrack_max/4）——桶内链表过长，高负载下查找退化为 O(n)，引发延迟毛刺；请重新运行 setup-server.sh 修复"
+    warn "conntrack hashsize 偏低（当前 ${CT_HASH}，建议 ≥ ${EXPECTED_HASH} = nf_conntrack_max/4）——桶内链表过长，高负载下查找退化为 O(n)，引发延迟毛刺；请重新运行 setup-server.sh 修复"
 else
     warn "无法读取 conntrack hashsize（/sys/module/nf_conntrack/parameters/hashsize 不可访问）"
 fi
@@ -350,8 +354,9 @@ PORT_RANGE=$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo "32768 6
 PORT_LOW=$(echo "$PORT_RANGE" | awk '{print $1}')
 PORT_HIGH=$(echo "$PORT_RANGE" | awk '{print $2}')
 PORT_COUNT=$(( PORT_HIGH - PORT_LOW + 1 ))
-if [[ "$PORT_LOW" -le 10000 && "$PORT_COUNT" -ge 50000 ]]; then
-    pass "NAT 出口端口范围已扩展（${PORT_LOW}-${PORT_HIGH}，共 ${PORT_COUNT} 个端口，防止高并发 NAT 端口耗尽）"
+# 核心判断：可用端口数量 ≥ 50000（Linux 默认约 28000，高并发 NAT 易耗尽）
+if [[ "$PORT_COUNT" -ge 50000 ]]; then
+    pass "NAT 出口端口范围充足（${PORT_LOW}-${PORT_HIGH}，共 ${PORT_COUNT} 个端口，防止高并发 NAT 端口耗尽）"
 else
     fail "NAT 出口端口范围不足（当前 ${PORT_LOW}-${PORT_HIGH}，共 ${PORT_COUNT} 个端口）——默认范围仅约 28000 个端口，高并发 NAT 下易耗尽，导致新出站连接失败（EADDRINUSE）；请重新运行 setup-server.sh 修复"
 fi
