@@ -271,14 +271,35 @@ New-NetFirewallRule -Name "WG-KS-AllowNTP" `
 
 # 允许 RDP 远程管理（防止 Kill Switch 阻断远程桌面响应流量，导致管理会话断开）
 # RDP 服务在 TCP 3389 侦听；出站方向的 LocalPort 3389 = 服务端向 RDP 客户端发回的响应包
-# 若不添加此规则，WG-KS-BlockOut 会阻断所有出站流量，包括 RDP 响应包，导致连接立即断开
-New-NetFirewallRule -Name "WG-KS-AllowRDP" `
-    -DisplayName "WireGuard KS: Allow RDP Remote Management" `
-    -Direction Outbound -Action Allow `
-    -Protocol TCP -LocalPort 3389 `
-    -Profile Any -Enabled True | Out-Null
+# 安全原则：仅对当前已建立 RDP 会话的来源 IP 开放豁免，而非全网段，防止 VPN 断线时数据通过 RDP 泄露
+$rdpClients = @()
+try {
+    $rdpConns = Get-NetTCPConnection -LocalPort 3389 -State Established -ErrorAction SilentlyContinue
+    if ($rdpConns) {
+        $rdpClients = $rdpConns |
+            Select-Object -ExpandProperty RemoteAddress -Unique |
+            Where-Object { $_ -notmatch '^(0\.0\.0\.0|::)$' }
+    }
+} catch {
+    Write-Warn "无法枚举 RDP 连接：$_"
+}
 
-Write-Info "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断；DHCP/NTP/RDP/链路本地已豁免）"
+if ($rdpClients.Count -gt 0) {
+    New-NetFirewallRule -Name "WG-KS-AllowRDP" `
+        -DisplayName "WireGuard KS: Allow RDP Remote Management" `
+        -Direction Outbound -Action Allow `
+        -Protocol TCP -LocalPort 3389 `
+        -RemoteAddress $rdpClients `
+        -Profile Any -Enabled True | Out-Null
+    Write-Warn "  已检测到 RDP 活跃连接，仅对管理 IP 添加 Kill Switch 豁免：$($rdpClients -join ', ')"
+    Write-Warn "  如管理 IP 变更，请重新运行安装脚本以更新规则 'WG-KS-AllowRDP'"
+} else {
+    Write-Warn "  未检测到活跃 RDP 会话；未添加 RDP 豁免规则。"
+    Write-Warn "  若通过 RDP 管理本机，请重新运行安装脚本（先建立 RDP 会话再执行），或手动执行："
+    Write-Warn "  New-NetFirewallRule -Name 'WG-KS-AllowRDP' -DisplayName 'WireGuard KS: Allow RDP Remote Management' -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3389 -RemoteAddress <管理IP> -Profile Any -Enabled True"
+}
+
+Write-Info "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断；DHCP/NTP/链路本地已豁免；RDP 豁免仅限已检测到的管理 IP）"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 5. 验证连接
