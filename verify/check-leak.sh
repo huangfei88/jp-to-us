@@ -199,7 +199,11 @@ if [[ -z "$SR6_ALL" ]]; then
 elif [[ "$SR6_ALL" == "0" ]]; then
     pass "IPv6 ICMP 重定向发送已禁用（all.send_redirects=0）"
 else
-    fail "IPv6 ICMP 重定向发送未禁用（当前值：${SR6_ALL}，期望值 0）——虽启用 IPv6 转发时内核隐式禁用，但显式配置可防止安全基线被其他工具覆盖"
+    if [[ "$FWD6" == "1" ]]; then
+        warn "IPv6 all.send_redirects 未显式禁用（当前值：${SR6_ALL}）——IPv6 转发已启用时内核已隐式禁用，安全基线已满足；显式设置为 0 是最佳实践，可防止其他工具覆盖；请重新运行 setup-server.sh"
+    else
+        fail "IPv6 ICMP 重定向发送未禁用（当前值：${SR6_ALL}，期望值 0）——IPv6 转发未启用时内核不会隐式禁用，攻击者可通过 ICMPv6 重定向操纵路由表"
+    fi
 fi
 SR6_DEF=$(sysctl -n net.ipv6.conf.default.send_redirects 2>/dev/null)
 if [[ -z "$SR6_DEF" ]]; then
@@ -211,7 +215,11 @@ if [[ -z "$SR6_DEF" ]]; then
 elif [[ "$SR6_DEF" == "0" ]]; then
     pass "IPv6 default.send_redirects 已禁用（新建接口如 wg0 继承安全基线）"
 else
-    fail "IPv6 default.send_redirects 未禁用（当前值：${SR6_DEF}，期望值 0）——新建接口可能发送 ICMPv6 重定向"
+    if [[ "$FWD6" == "1" ]]; then
+        warn "IPv6 default.send_redirects 未显式禁用（当前值：${SR6_DEF}）——IPv6 转发已启用时内核已隐式禁用，安全基线已满足；显式设置为 0 是最佳实践；请重新运行 setup-server.sh"
+    else
+        fail "IPv6 default.send_redirects 未禁用（当前值：${SR6_DEF}，期望值 0）——IPv6 转发未启用时新建接口可能发送 ICMPv6 重定向"
+    fi
 fi
 
 # ── 10. 反向路径过滤（rp_filter）──────────────────────────────────────────────

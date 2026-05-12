@@ -226,12 +226,12 @@ modprobe tcp_bbr 2>/dev/null || true
 modprobe nf_conntrack 2>/dev/null || true
 sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
 
-# IPv6 send_redirects 在部分内核/容器环境中不存在（IPv6 转发开启时内核已隐式禁用）。
-# 条件写入：路径存在才设置并追加到持久化配置，避免 sysctl -p 在重启时因路径缺失而报错退出。
+# IPv6 send_redirects 在部分内核/容器环境中无法通过 sysctl -p 设置（procfs stat 失败）。
+# 改为逐参数尝试写入（sysctl -w）：成功才追加到持久化配置，失败则静默跳过。
+# 这比 -f 测试更可靠：-f 在 VPS/容器 procfs 上可能误判，而 sysctl -w 使用内核 sysctl 接口直接写入。
 # 注意：上方 heredoc 每次运行都完整覆写配置文件，此处的追加在同一次运行中最多执行一次，不会产生重复条目。
 for _P6SR in net.ipv6.conf.all.send_redirects net.ipv6.conf.default.send_redirects; do
-    if [[ -f "/proc/sys/$(printf '%s' "$_P6SR" | tr '.' '/')" ]]; then
-        sysctl -w "${_P6SR}=0" > /dev/null 2>&1 || true
+    if sysctl -w "${_P6SR}=0" > /dev/null 2>&1; then
         echo "${_P6SR} = 0" >> /etc/sysctl.d/99-vpn-perf.conf
     fi
 done
