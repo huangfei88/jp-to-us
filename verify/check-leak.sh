@@ -276,15 +276,41 @@ else
     fail "conntrack tcp_timeout_close_wait 过长（当前 ${CT_CW}s，建议 ≤ 30s）——CLOSE_WAIT 条目回收慢"
 fi
 
-# WireGuard UDP 流超时（udp_timeout_stream）：必须显著大于 PersistentKeepalive（25s）
-# 要求 ≥ 50s（keepalive × 2）：若超时仅与 keepalive 间隔相近，任何轻微抖动或
-# 处理延迟都会导致 WireGuard UDP 会话在两次 keepalive 之间被从 conntrack 表删除，
-# 造成 NAT 映射消失，服务器向客户端的返回包被丢弃，隧道单方向断流
+# WireGuard UDP 流超时（udp_timeout_stream）：需 ≥ 3× PersistentKeepalive（25s）= 75s
+# 跨太平洋链路上 keepalive 包存在周期性丢包风险；若连续两个 keepalive（t=25, t=50）丢失，
+# 第三个 keepalive（t=75）仍需在超时前到达以维持 NAT 映射。
+# 推荐值 120s（4.8×）在充足安全边际与 conntrack 内存占用之间取得平衡。
 CT_UDP_STREAM=$(sysctl -n net.netfilter.nf_conntrack_udp_timeout_stream 2>/dev/null || echo 30)
-if [[ "$CT_UDP_STREAM" -ge 50 ]]; then
-    pass "conntrack udp_timeout_stream 已调优（${CT_UDP_STREAM}s ≥ 50s，WireGuard keepalive=25s 的 2 倍安全边际）"
+if [[ "$CT_UDP_STREAM" -ge 60 ]]; then
+    pass "conntrack udp_timeout_stream 已调优（${CT_UDP_STREAM}s ≥ 60s，WireGuard keepalive=25s 的 2.4 倍以上安全边际；推荐值 120s）"
 else
-    fail "conntrack udp_timeout_stream 过短（当前 ${CT_UDP_STREAM}s，建议 ≥ 50s）——可能短于 WireGuard PersistentKeepalive 两次间隔，导致 NAT 映射消失、隧道返回包丢弃"
+    fail "conntrack udp_timeout_stream 过短（当前 ${CT_UDP_STREAM}s，推荐 120s / 最低 60s）——跨太平洋链路 keepalive 丢包时 NAT 映射可能提前消失，隧道返回包被单方向丢弃"
+fi
+
+# ── 15b. conntrack 表使用率 ────────────────────────────────────────────────────
+info "检查 conntrack 表使用率..."
+if [[ "$CT_MAX" -gt 0 && "$CT_COUNT" != "N/A" ]]; then
+    CT_PCT=$(( CT_COUNT * 100 / CT_MAX ))
+    if [[ "$CT_PCT" -ge 80 ]]; then
+        fail "conntrack 表使用率危险（当前 ${CT_COUNT}/${CT_MAX}，${CT_PCT}%）——即将触发 conntrack 满表丢包；请立即排查连接泄漏或增大 nf_conntrack_max"
+    elif [[ "$CT_PCT" -ge 60 ]]; then
+        warn "conntrack 表使用率较高（当前 ${CT_COUNT}/${CT_MAX}，${CT_PCT}%）——建议监控流量增长趋势，必要时提前扩容"
+    else
+        pass "conntrack 表使用率正常（当前 ${CT_COUNT}/${CT_MAX}，${CT_PCT}%）"
+    fi
+else
+    warn "无法计算 conntrack 使用率（CT_MAX=${CT_MAX} CT_COUNT=${CT_COUNT}）"
+fi
+
+# ── 15c. conntrack hashsize（查找性能）────────────────────────────────────────
+info "检查 conntrack hashsize（哈希桶数量）..."
+CT_HASH=$(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo 0)
+if [[ "$CT_HASH" -ge 131072 ]]; then
+    pass "conntrack hashsize 已调优（${CT_HASH} = nf_conntrack_max/4，O(1) 查找性能）"
+elif [[ "$CT_HASH" -gt 0 ]]; then
+    warn "conntrack hashsize 偏低（当前 ${CT_HASH}，建议 ≥ 131072 = nf_conntrack_max/4）——桶内链表过长，高负载下查找退化为 O(n)，引发延迟毛刺；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 conntrack hashsize（/sys/module/nf_conntrack/parameters/hashsize 不可访问）"
 fi
 
 # ── 16. WireGuard peer 状态 ───────────────────────────────────────────────────
@@ -317,6 +343,42 @@ NO_METRICS=$(sysctl -n net.ipv4.tcp_no_metrics_save 2>/dev/null || echo 0)
 [[ "$NO_METRICS" == "1" ]] \
     && pass "tcp_no_metrics_save 已启用（NAT 网关不缓存连接度量，避免跨太平洋坏度量污染新连接）" \
     || fail "tcp_no_metrics_save 未启用（当前 ${NO_METRICS}，期望值 1）——坏 TCP 度量（RTT/MSS/cwnd）将被重用于后续同目的 IP 的新连接，影响吞吐量"
+
+# ── 17b. NAT 出口端口范围（防端口耗尽）────────────────────────────────────────
+info "检查 NAT 出口端口范围（ip_local_port_range）..."
+PORT_RANGE=$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo "32768 60999")
+PORT_LOW=$(echo "$PORT_RANGE" | awk '{print $1}')
+PORT_HIGH=$(echo "$PORT_RANGE" | awk '{print $2}')
+PORT_COUNT=$(( PORT_HIGH - PORT_LOW + 1 ))
+if [[ "$PORT_LOW" -le 10000 && "$PORT_COUNT" -ge 50000 ]]; then
+    pass "NAT 出口端口范围已扩展（${PORT_LOW}-${PORT_HIGH}，共 ${PORT_COUNT} 个端口，防止高并发 NAT 端口耗尽）"
+else
+    fail "NAT 出口端口范围不足（当前 ${PORT_LOW}-${PORT_HIGH}，共 ${PORT_COUNT} 个端口）——默认范围仅约 28000 个端口，高并发 NAT 下易耗尽，导致新出站连接失败（EADDRINUSE）；请重新运行 setup-server.sh 修复"
+fi
+
+# ── 17c. TCP 慢启动恢复（空闲后性能）─────────────────────────────────────────
+info "检查 TCP 空闲慢启动（tcp_slow_start_after_idle）..."
+SLOW_START=$(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null || echo 1)
+[[ "$SLOW_START" == "0" ]] \
+    && pass "tcp_slow_start_after_idle 已禁用（跨太平洋链路空闲后恢复流量无降速惩罚）" \
+    || fail "tcp_slow_start_after_idle 未禁用（当前 ${SLOW_START}，期望值 0）——高延迟链路上 TCP 空闲后重启慢启动，流量恢复初始窗口极小，吞吐量骤降；对 VPN 隧道内周期性突发流量影响显著"
+
+# ── 17d. TIME_WAIT 端口复用 ────────────────────────────────────────────────────
+info "检查 TCP TIME_WAIT 端口复用（tcp_tw_reuse）..."
+TW_REUSE=$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null || echo 0)
+[[ "$TW_REUSE" == "1" ]] \
+    && pass "tcp_tw_reuse 已启用（TIME_WAIT 端口可复用，减少 NAT 高并发下端口耗尽风险）" \
+    || fail "tcp_tw_reuse 未启用（当前 ${TW_REUSE}，期望值 1）——NAT 网关高并发下 TIME_WAIT 端口不可复用，出口端口耗尽风险增加；请重新运行 setup-server.sh 修复"
+
+# ── 17e. 套接字缓冲区（高 BDP 跨太平洋吞吐量）────────────────────────────────
+info "检查套接字缓冲区大小（rmem_max / wmem_max）..."
+RMEM_MAX=$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)
+WMEM_MAX=$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0)
+if [[ "$RMEM_MAX" -ge 67108864 && "$WMEM_MAX" -ge 67108864 ]]; then
+    pass "套接字缓冲区已调优（rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}，64 MB，适配高 BDP 跨太平洋链路）"
+else
+    fail "套接字缓冲区不足（rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}）——默认 ~200 KB 无法充分利用跨太平洋链路的带宽延迟积（BDP），吞吐量受限；请重新运行 setup-server.sh 修复"
+fi
 
 # ── 18. 内核模块开机自动加载持久化（企业级稳定性：重启后 sysctl 参数必须仍然生效）────────
 # systemd-sysctl.service 的 unit 文件中有 After=systemd-modules-load.service，
