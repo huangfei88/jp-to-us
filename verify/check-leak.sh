@@ -22,6 +22,14 @@ if [[ -f "/etc/wireguard/${WG_IFACE}.conf" ]]; then
     [[ "$_CFG_PORT" =~ ^[0-9]+$ ]] && WG_PORT="$_CFG_PORT"
 fi
 
+# ── 性能阈值常量（与 setup-server.sh 中的 sysctl 配置保持一致）──────────────────
+# conntrack hashsize 最小值 = nf_conntrack_max / 4；当 CT_MAX 不可读时使用此回退值
+DEFAULT_CONNTRACK_HASHSIZE=131072
+# NAT 出口端口池最小可用数量：Linux 默认仅约 28000（32768-60999），高并发下易耗尽
+MIN_NAT_PORT_COUNT=50000
+# 套接字缓冲区最小值（字节）：64 MB = 67108864，适配高带宽延迟积（BDP）的跨太平洋链路
+MIN_SOCKET_BUFFER_SIZE=67108864
+
 echo ""
 echo "═══════════════════════════════════════════════════════"
 echo "  WireGuard 服务端泄露检测"
@@ -308,7 +316,7 @@ fi
 info "检查 conntrack hashsize（哈希桶数量）..."
 CT_HASH=$(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo 0)
 # 期望值 = nf_conntrack_max / 4（建议比例），动态计算以跟随 CT_MAX 变化
-EXPECTED_HASH=$(( CT_MAX > 0 ? CT_MAX / 4 : 131072 ))
+EXPECTED_HASH=$(( CT_MAX > 0 ? CT_MAX / 4 : DEFAULT_CONNTRACK_HASHSIZE ))
 if [[ "$CT_HASH" -ge "$EXPECTED_HASH" ]]; then
     pass "conntrack hashsize 已调优（${CT_HASH} ≥ nf_conntrack_max/4=${EXPECTED_HASH}，O(1) 查找性能）"
 elif [[ "$CT_HASH" -gt 0 ]]; then
@@ -354,8 +362,8 @@ PORT_RANGE=$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo "32768 6
 PORT_LOW=$(echo "$PORT_RANGE" | awk '{print $1}')
 PORT_HIGH=$(echo "$PORT_RANGE" | awk '{print $2}')
 PORT_COUNT=$(( PORT_HIGH - PORT_LOW + 1 ))
-# 核心判断：可用端口数量 ≥ 50000（Linux 默认约 28000，高并发 NAT 易耗尽）
-if [[ "$PORT_COUNT" -ge 50000 ]]; then
+# 核心判断：可用端口数量 ≥ MIN_NAT_PORT_COUNT（Linux 默认约 28000，高并发 NAT 易耗尽）
+if [[ "$PORT_COUNT" -ge "$MIN_NAT_PORT_COUNT" ]]; then
     pass "NAT 出口端口范围充足（${PORT_LOW}-${PORT_HIGH}，共 ${PORT_COUNT} 个端口，防止高并发 NAT 端口耗尽）"
 else
     fail "NAT 出口端口范围不足（当前 ${PORT_LOW}-${PORT_HIGH}，共 ${PORT_COUNT} 个端口）——默认范围仅约 28000 个端口，高并发 NAT 下易耗尽，导致新出站连接失败（EADDRINUSE）；请重新运行 setup-server.sh 修复"
@@ -379,7 +387,7 @@ TW_REUSE=$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null || echo 0)
 info "检查套接字缓冲区大小（rmem_max / wmem_max）..."
 RMEM_MAX=$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)
 WMEM_MAX=$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0)
-if [[ "$RMEM_MAX" -ge 67108864 && "$WMEM_MAX" -ge 67108864 ]]; then
+if [[ "$RMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" && "$WMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" ]]; then
     pass "套接字缓冲区已调优（rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}，64 MB，适配高 BDP 跨太平洋链路）"
 else
     fail "套接字缓冲区不足（rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}）——默认 ~200 KB 无法充分利用跨太平洋链路的带宽延迟积（BDP），吞吐量受限；请重新运行 setup-server.sh 修复"
