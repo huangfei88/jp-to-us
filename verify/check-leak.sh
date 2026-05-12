@@ -201,7 +201,7 @@ fi
 info "WireGuard 连接状态："
 wg show "$WG_IFACE" 2>/dev/null || fail "无法读取 wg show 输出"
 
-# ── 17. 软中断数据包预算（netdev_budget）─────────────────────────────────────
+# ── 17. 软中断数据包预算（netdev_budget / netdev_budget_usecs）────────────────
 info "检查软中断数据包预算（netdev_budget）..."
 BUDGET=$(sysctl -n net.core.netdev_budget 2>/dev/null || echo 0)
 if [[ "$BUDGET" -ge 600 ]]; then
@@ -211,6 +211,22 @@ elif [[ "$BUDGET" -gt 0 ]]; then
 else
     warn "无法读取 netdev_budget"
 fi
+
+info "检查 NAPI poll 时间预算（netdev_budget_usecs，Linux 5.0+）..."
+BUDGET_USECS=$(sysctl -n net.core.netdev_budget_usecs 2>/dev/null || echo 0)
+if [[ "$BUDGET_USECS" -ge 8000 ]]; then
+    pass "netdev_budget_usecs 已调优（${BUDGET_USECS} μs，高速链路吞吐量提升）"
+elif [[ "$BUDGET_USECS" -gt 0 ]]; then
+    warn "netdev_budget_usecs 较低（当前 ${BUDGET_USECS} μs，建议 ≥ 8000 以避免高速链路上 NAPI poll 提前退出，运行 setup-server.sh 可自动调优）"
+else
+    warn "无法读取 netdev_budget_usecs（内核 < 5.0 或参数不可用，可忽略）"
+fi
+
+info "检查 TCP 度量缓存禁用（tcp_no_metrics_save）..."
+NO_METRICS=$(sysctl -n net.ipv4.tcp_no_metrics_save 2>/dev/null || echo 0)
+[[ "$NO_METRICS" == "1" ]] \
+    && pass "tcp_no_metrics_save 已启用（NAT 网关不缓存连接度量，避免跨太平洋坏度量污染新连接）" \
+    || fail "tcp_no_metrics_save 未启用（当前 ${NO_METRICS}，期望值 1）——坏 TCP 度量（RTT/MSS/cwnd）将被重用于后续同目的 IP 的新连接，影响吞吐量"
 
 # ── 18. iptables 后端一致性（Debian 版本感知）──────────────────────────────────
 # Debian 13+（Trixie）：正确后端是 iptables-nft（native nftables 框架）

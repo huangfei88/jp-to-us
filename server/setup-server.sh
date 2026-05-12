@@ -116,6 +116,7 @@ cat > /etc/sysctl.d/99-vpn-perf.conf << 'SYSCTL'
 # ── 转发 ──
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
 
 # ── BBR 拥塞控制（低延迟高带宽）──
 net.core.default_qdisc = fq
@@ -143,6 +144,22 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.ip_local_port_range = 10000 65535
 # TCP MTU 探测：防止跨太平洋链路上 PMTUD 黑洞导致 TCP 连接卡死（企业级必须）
 net.ipv4.tcp_mtu_probing = 1
+# 禁止内核缓存 TCP 连接度量（RTT/MSS/cwnd）——对 NAT 网关尤为重要：
+# 跨太平洋链路上一次失败/超时连接的坏度量会被重用于后续同目的 IP 的新连接，
+# 导致新连接初始窗口异常小或 MSS 被错误压低，降低所有用户的吞吐量
+net.ipv4.tcp_no_metrics_save = 1
+# SYN-ACK 重传次数：默认 5（约 63 s 后放弃）→ 2（约 7 s 后放弃）
+# 未完成 TCP 握手的半开连接占用 conntrack 表；缩短重试次数可加速僵尸连接清理，
+# 减轻 NAT 网关在高并发下的 conntrack 压力（对 VPN 隧道的 UDP 流量无影响）
+net.ipv4.tcp_synack_retries = 2
+# 孤立（orphaned）套接字最大数量：FIN 阶段已被应用层关闭但 TCP 尚未完成 4 次挥手
+# 的连接。NAT 网关高并发下默认上限（约 4096–16384）可能不够用，设为 32768 避免
+# "TCP: too many of orphaned sockets" 导致的新连接被静默拒绝
+net.ipv4.tcp_max_orphans = 32768
+# 孤立连接 FIN 重传次数：默认 7（约 112 s 后关闭）→ 2（约 1 s 后关闭）
+# 跨太平洋链路 RTT ~180 ms，初始 RTO 约 360 ms；两次重传 360 + 720 ms ≈ 1 s；
+# 加速释放孤立连接占用的 conntrack/内存资源，同时保留足够时间处理高延迟 ACK
+net.ipv4.tcp_orphan_retries = 2
 # socket 选项内存上限：辅助数据（ancillary data / cmsg）的每个套接字内存上限。
 # 512 KB（524288 B）确保大缓冲区场景下 IP_PKTINFO、SO_TIMESTAMPING 等辅助选项
 # 不会因默认 20480 B 上限而被截断，与 64 MB rmem_max/wmem_max 配套使用。
@@ -190,6 +207,11 @@ net.ipv6.conf.default.accept_source_route = 0
 # 每次 NAPI poll 处理的最大数据包数（默认 300）——对高速 VPN 转发场景可提升吞吐量
 # 防止网卡在大流量时因配额不足被频繁打断，减少 CPU 上下文切换
 net.core.netdev_budget = 600
+# netdev_budget_usecs：Linux 5.0+ 中 NAPI poll 的最大时间预算（默认 2000 μs = 2 ms）
+# 2 ms 在高速链路上会在数据包配额耗尽前提前退出，降低吞吐量；
+# 8000 μs（8 ms）配合 netdev_budget=600，让每轮 softirq 有充足时间处理批量 UDP 包，
+# 降低 WireGuard 数据包处理的上下文切换开销，提升跨太平洋隧道吞吐量
+net.core.netdev_budget_usecs = 8000
 SYSCTL
 # 预加载 BBR 模块（如果可用）——必须在 sysctl -p 之前，否则在以模块形式编译 BBR 的内核上
 # sysctl -p 对 tcp_congestion_control = bbr 报 "Invalid argument"，set -e 会中断整个脚本
