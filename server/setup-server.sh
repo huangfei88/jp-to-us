@@ -209,10 +209,6 @@ net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 net.ipv6.conf.all.accept_source_route = 0
 net.ipv6.conf.default.accept_source_route = 0
-# 禁止发送 IPv6 ICMP 重定向（转发开启时内核隐式禁用，但显式设置确保安全基线不受配置变更影响）
-net.ipv6.conf.all.send_redirects = 0
-net.ipv6.conf.default.send_redirects = 0
-
 # ── 软中断数据包预算（提升高负载吞吐量）──
 # 每次 NAPI poll 处理的最大数据包数（默认 300）——对高速 VPN 转发场景可提升吞吐量
 # 防止网卡在大流量时因配额不足被频繁打断，减少 CPU 上下文切换
@@ -229,6 +225,16 @@ modprobe tcp_bbr 2>/dev/null || true
 # 预加载 nf_conntrack 模块，确保 sysctl 中的 nf_conntrack_max 等参数可写
 modprobe nf_conntrack 2>/dev/null || true
 sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
+
+# IPv6 send_redirects 在部分内核/容器环境中无法通过 sysctl -p 设置（procfs stat 失败）。
+# 改为逐参数尝试写入（sysctl -w）：成功才追加到持久化配置，失败则静默跳过。
+# 这比 -f 测试更可靠：-f 在 VPS/容器 procfs 上可能误判，而 sysctl -w 使用内核 sysctl 接口直接写入。
+# 注意：上方 heredoc 每次运行都完整覆写配置文件，此处的追加在同一次运行中最多执行一次，不会产生重复条目。
+for _P6SR in net.ipv6.conf.all.send_redirects net.ipv6.conf.default.send_redirects; do
+    if sysctl -w "${_P6SR}=0" > /dev/null 2>&1; then
+        echo "${_P6SR} = 0" >> /etc/sysctl.d/99-vpn-perf.conf
+    fi
+done
 
 # 设置 conntrack 哈希桶数（建议值 = nf_conntrack_max / 4）
 # hashsize 仅可在模块加载后通过 sysfs 写入，不走 sysctl
@@ -255,7 +261,12 @@ else
         /etc/sysctl.d/99-vpn-perf.conf
     sed -i 's/net.core.default_qdisc = fq$/net.core.default_qdisc = fq_codel/' \
         /etc/sysctl.d/99-vpn-perf.conf
-    sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
+    # 仅对两个被修改的参数做定向写入（避免重新 sysctl -p 整个文件）：
+    # sysctl -p 会对 IPv6 send_redirects 路径做 stat() 检查，若路径在此内核上不可 stat()
+    # （部分 VPS 内核的 procfs 行为），sysctl -p 退出非零并触发 set -e 中断脚本。
+    # 持久化（重启后生效）已由上方 sed 完成；此处仅更新当前会话运行时值。
+    sysctl -w net.ipv4.tcp_congestion_control=cubic   > /dev/null 2>&1 || true
+    sysctl -w net.core.default_qdisc=fq_codel         > /dev/null 2>&1 || true
 fi
 
 # ── 3. 生成密钥对 ──────────────────────────────────────────────────────────────
