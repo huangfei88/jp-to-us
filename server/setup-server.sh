@@ -340,8 +340,17 @@ if command -v ufw &>/dev/null; then
     ufw allow "${WG_PORT}/udp" > /dev/null
     ufw allow OpenSSH         > /dev/null
     # DEFAULT_FORWARD_POLICY=ACCEPT 是 UFW 允许内核 FORWARD 链生效的前提（wg-quick PostUp 依赖此策略）
-    sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' \
-        /etc/default/ufw 2>/dev/null || true
+    # 使用通配替换而非仅匹配 "DROP"：若当前值为 "REJECT" 或行不存在，原 sed 静默失效，
+    # UFW 的 ufw-after-forward 链 catchall DROP/REJECT 落在 wg-quick PostUp 追加的 FORWARD
+    # ACCEPT 规则之前，所有 VPN 流量被静默丢弃——此为跨太平洋链路常见静默故障根因之一
+    if [[ -f /etc/default/ufw ]]; then
+        if grep -q '^DEFAULT_FORWARD_POLICY=' /etc/default/ufw; then
+            sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' \
+                /etc/default/ufw 2>/dev/null || true
+        else
+            echo 'DEFAULT_FORWARD_POLICY="ACCEPT"' >> /etc/default/ufw
+        fi
+    fi
     ufw --force enable  > /dev/null
     # 必须显式 reload：若 UFW 在 enable 时已处于激活状态（常见情况），
     # enable 是空操作，不会重新读取 /etc/default/ufw 中的 DEFAULT_FORWARD_POLICY。

@@ -129,6 +129,11 @@ SR=$(sysctl -n net.ipv4.conf.all.send_redirects 2>/dev/null || echo 1)
 AR=$(sysctl -n net.ipv4.conf.all.accept_redirects 2>/dev/null || echo 1)
 [[ "$AR" == "0" ]] && pass "ICMP 重定向接受已禁用（防路由表被远程劫持）" \
                    || fail "ICMP 重定向接受未禁用（路由可能被远程重定向攻击劫持）"
+# default.accept_redirects：wg0 每次由 wg-quick 动态创建，继承 default 而非 all；
+# 若 default 未被设为 0，wg0 创建后将接受 ICMP 重定向，路由表可被远程篡改
+AR_DEF=$(sysctl -n net.ipv4.conf.default.accept_redirects 2>/dev/null || echo 1)
+[[ "$AR_DEF" == "0" ]] && pass "IPv4 default.accept_redirects 已禁用（新建接口如 wg0 继承安全基线）" \
+                        || fail "IPv4 default.accept_redirects 未禁用（当前值：${AR_DEF}，期望值 0）——wg0 等动态接口创建后将接受 ICMP 重定向，路由表可被远程篡改"
 
 # IPv6 accept_redirects：与 IPv4 同等重要，防止 ICMPv6 重定向修改路由表
 AR6=$(sysctl -n net.ipv6.conf.all.accept_redirects 2>/dev/null || echo 1)
@@ -143,6 +148,10 @@ info "检查反向路径过滤（rp_filter）..."
 RP=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo 0)
 [[ "$RP" == "1" ]] && pass "rp_filter 已启用（防 IP 源地址欺骗 / 洪水攻击）" \
                    || fail "rp_filter 未启用（当前值：${RP}），IP 源地址欺骗风险增加"
+# default.rp_filter：wg0 动态创建时继承 default；若 default 为 0，wg0 无源地址欺骗防护
+RP_DEF=$(sysctl -n net.ipv4.conf.default.rp_filter 2>/dev/null || echo 0)
+[[ "$RP_DEF" == "1" ]] && pass "net.ipv4.conf.default.rp_filter 已启用（新建接口如 wg0 继承反向路径过滤）" \
+                        || fail "net.ipv4.conf.default.rp_filter 未启用（当前值：${RP_DEF}）——新建接口（含 wg0）无 IP 源地址欺骗防护"
 
 # ── 11. 源路由防护（accept_source_route）──────────────────────────────────────
 info "检查源路由防护..."
@@ -152,6 +161,14 @@ SR4=$(sysctl -n net.ipv4.conf.all.accept_source_route 2>/dev/null || echo 1)
 SR6=$(sysctl -n net.ipv6.conf.all.accept_source_route 2>/dev/null || echo 1)
 [[ "$SR6" == "0" ]] && pass "IPv6 源路由已禁用" \
                     || fail "IPv6 源路由未禁用（当前值：${SR6}）"
+# default.accept_source_route：wg0 动态创建时继承 default；
+# 若 default 未被设为 0，攻击者可通过源路由选项操纵进入 wg0 的数据包路径，绕过防火墙 / NAT
+SR4DEF=$(sysctl -n net.ipv4.conf.default.accept_source_route 2>/dev/null || echo 1)
+[[ "$SR4DEF" == "0" ]] && pass "IPv4 default.accept_source_route 已禁用（新建接口继承安全基线）" \
+                        || fail "IPv4 default.accept_source_route 未禁用（当前值：${SR4DEF}，期望值 0）——新建接口（含 wg0）可接受源路由，攻击者可操纵包路径绕过防火墙/NAT"
+SR6DEF=$(sysctl -n net.ipv6.conf.default.accept_source_route 2>/dev/null || echo 1)
+[[ "$SR6DEF" == "0" ]] && pass "IPv6 default.accept_source_route 已禁用（新建接口继承安全基线）" \
+                        || fail "IPv6 default.accept_source_route 未禁用（当前值：${SR6DEF}，期望值 0）——新建接口（含 wg0）可接受 IPv6 源路由"
 
 # ── 12. TCP Keepalive ──────────────────────────────────────────────────────────
 info "检查 TCP Keepalive 参数..."
@@ -344,6 +361,19 @@ if command -v ufw &>/dev/null; then
             pass "UFW 已开放 WireGuard 端口 ${WG_PORT}/udp"
         else
             fail "UFW 未开放 WireGuard 端口 ${WG_PORT}/udp（握手包将被丢弃，隧道无法建立）"
+        fi
+        # DEFAULT_FORWARD_POLICY 必须为 ACCEPT：UFW 激活时在 ufw-after-forward 链插入 catchall
+        # DROP/REJECT 规则；wg-quick PostUp 使用 -A（追加）将 FORWARD ACCEPT 规则写到 FORWARD
+        # 链末尾，在 UFW 的 catchall 之后——VPN 流量在到达 ACCEPT 规则前就被 UFW 丢弃。
+        # FORWARD 链的默认策略（-P FORWARD ACCEPT）只作用于通过所有链规则后仍未匹配的流量，
+        # 但 UFW 的 ufw-after-forward 链内有显式 DROP 规则，所以仅改默认策略不够，
+        # 必须将 DEFAULT_FORWARD_POLICY 设为 ACCEPT 使 UFW 不生成该 catchall DROP。
+        FWD_POL=$(grep '^DEFAULT_FORWARD_POLICY=' /etc/default/ufw 2>/dev/null \
+                  | cut -d= -f2 | tr -d '"')
+        if [[ "$FWD_POL" == "ACCEPT" ]]; then
+            pass "UFW DEFAULT_FORWARD_POLICY=ACCEPT（VPN 流量可正常转发）"
+        else
+            fail "UFW DEFAULT_FORWARD_POLICY=${FWD_POL:-未设置}（期望 ACCEPT）——UFW 的 ufw-after-forward 链 catchall DROP 在 wg-quick FORWARD ACCEPT 规则之前执行，VPN 流量被静默丢弃；请重新运行 setup-server.sh 修复"
         fi
     else
         warn "UFW 已安装但未激活（当前由 iptables/netfilter-persistent 直接管理规则）"
