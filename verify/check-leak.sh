@@ -320,6 +320,20 @@ else
     fail "conntrack udp_timeout_stream 过短（当前 ${CT_UDP_STREAM}s，推荐 120s / 最低 60s）——跨太平洋链路 keepalive 丢包时 NAT 映射可能提前消失，隧道返回包被单方向丢弃"
 fi
 
+# conntrack 单向 UDP 超时（udp_timeout）：控制仅看到单向流量的 UDP conntrack 条目生命周期
+# 典型场景：DNS 查询（客户端→1.1.1.1）发出后若短时间内未收到回复，条目已超时，
+# NAT 映射消失，回复包被视为"新包"并被 NAT 丢弃（INVALID 状态）。
+# 默认值 30s（Linux 内核默认），建议保持 ≤ 30s：时间越短，conntrack 内存回收越快。
+# 超过 30s 意味着大量短生命周期 UDP 流（DNS/NTP 等）的 conntrack 条目长期占用内存。
+CT_UDP_TIMEOUT=$(sysctl -n net.netfilter.nf_conntrack_udp_timeout 2>/dev/null || echo 0)
+if [[ "$CT_UDP_TIMEOUT" -le 30 && "$CT_UDP_TIMEOUT" -gt 0 ]]; then
+    pass "conntrack udp_timeout 已调优（${CT_UDP_TIMEOUT}s ≤ 30s，单向 UDP 条目快速回收，conntrack 内存使用最优）"
+elif [[ "$CT_UDP_TIMEOUT" -gt 30 ]]; then
+    fail "conntrack udp_timeout 过长（当前 ${CT_UDP_TIMEOUT}s，建议 ≤ 30s）——DNS/NTP 等短生命周期单向 UDP 流的 conntrack 条目长期占用内存，加速 conntrack 表耗尽；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 conntrack udp_timeout（模块未加载或内核不支持）"
+fi
+
 # ── 15b. conntrack 表使用率 ────────────────────────────────────────────────────
 info "检查 conntrack 表使用率..."
 if [[ "$CT_MAX" -gt 0 && "$CT_COUNT" != "N/A" ]]; then
@@ -421,6 +435,24 @@ SLOW_START=$(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null || echo 1)
     && pass "tcp_slow_start_after_idle 已禁用（跨太平洋链路空闲后恢复流量无降速惩罚）" \
     || fail "tcp_slow_start_after_idle 未禁用（当前 ${SLOW_START}，期望值 0）——高延迟链路上 TCP 空闲后重启慢启动，流量恢复初始窗口极小，吞吐量骤降；对 VPN 隧道内周期性突发流量影响显著"
 
+# ── 17c-2. TCP Fast Open（tcp_fastopen）─────────────────────────────────────
+# tcp_fastopen=3（客户端+服务端双向开启）：
+#   SYN 包携带数据，服务端回复 SYN-ACK 时同步返回响应数据，消除 TCP 握手的额外 RTT
+#   对跨太平洋链路（RTT ~180 ms）：每次新连接可节省 ~180 ms 延迟
+#   - 值 0：TFO 完全禁用（默认）
+#   - 值 1：仅客户端模式（connect() 使用 TFO cookie 发送数据）
+#   - 值 2：仅服务端模式（accept() 接受 TFO 请求）
+#   - 值 3：双向模式（企业级 VPN 服务器最优，SSH 管理 + NAT 内部连接均受益）
+info "检查 TCP Fast Open（tcp_fastopen）..."
+TFO=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo 0)
+if [[ "$TFO" -eq 3 ]]; then
+    pass "TCP Fast Open 已启用（双向模式=3，新建连接节省 1 次 RTT，跨太平洋链路低延迟）"
+elif [[ "$TFO" -gt 0 ]]; then
+    warn "TCP Fast Open 部分启用（当前 ${TFO}，推荐 3 = 双向）——建议重新运行 setup-server.sh，将 tcp_fastopen 设为 3 以充分利用双向 TFO 节省跨太平洋高延迟链路的握手开销"
+else
+    fail "TCP Fast Open 未启用（当前 ${TFO}，期望 3）——每次新 TCP 连接额外消耗 ~180 ms 握手 RTT；请重新运行 setup-server.sh 修复"
+fi
+
 # ── 17d. TIME_WAIT 端口复用 ────────────────────────────────────────────────────
 info "检查 TCP TIME_WAIT 端口复用（tcp_tw_reuse）..."
 TW_REUSE=$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null || echo 0)
@@ -436,6 +468,26 @@ if [[ "$RMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" && "$WMEM_MAX" -ge "$MIN_SOCKET_
     pass "套接字缓冲区已调优（rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}，64 MB，适配高 BDP 跨太平洋链路）"
 else
     fail "套接字缓冲区不足（rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}）——默认 ~200 KB 无法充分利用跨太平洋链路的带宽延迟积（BDP），吞吐量受限；请重新运行 setup-server.sh 修复"
+fi
+
+# ── 17e-2. TCP 自动调优上限（tcp_rmem / tcp_wmem max 字段）─────────────────────
+# net.core.rmem_max 是 SO_RCVBUF 的用户态硬上限；而 TCP 自动调优的上限由 tcp_rmem[2]（最大值字段）
+# 单独控制。内核 TCP 自动调优使用 min(tcp_rmem[2], rmem_max) 作为上界：
+#   - 若 tcp_rmem[2] = 4 MB（内核默认）而 rmem_max = 64 MB：自动调优被 tcp_rmem[2] 的 4 MB 锁死
+#   - 跨太平洋链路 RTT ~180 ms，BDP（100 Mbps）= 100 Mbps × 0.18 s = 22.5 MB；
+#     4 MB 缓冲区将实际吞吐量上限压缩至约 4 MB / 0.18 s ≈ 22 Mbps，哪怕 rmem_max = 64 MB 也无效
+#   - tcp_rmem[2] = tcp_wmem[2] = 64 MB 与 rmem_max/wmem_max 一致，TCP 自动调优才能充分利用
+#     大带宽延迟积（BDP）链路
+info "检查 TCP 自动调优上限（tcp_rmem max / tcp_wmem max）..."
+TCP_RMEM_MAX=$(sysctl -n net.ipv4.tcp_rmem 2>/dev/null | awk '{print $3}' || echo 0)
+TCP_WMEM_MAX=$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null | awk '{print $3}' || echo 0)
+# 确保为数值（awk 失败时可能为空）
+[[ "$TCP_RMEM_MAX" =~ ^[0-9]+$ ]] || TCP_RMEM_MAX=0
+[[ "$TCP_WMEM_MAX" =~ ^[0-9]+$ ]] || TCP_WMEM_MAX=0
+if [[ "$TCP_RMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" && "$TCP_WMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" ]]; then
+    pass "TCP 自动调优上限已调优（tcp_rmem max=${TCP_RMEM_MAX} tcp_wmem max=${TCP_WMEM_MAX}，与 rmem_max/wmem_max 一致，BDP 可完整利用）"
+else
+    fail "TCP 自动调优上限不足（tcp_rmem max=${TCP_RMEM_MAX} tcp_wmem max=${TCP_WMEM_MAX}，期望 ≥ ${MIN_SOCKET_BUFFER_SIZE}）——rmem_max=64 MB 被 tcp_rmem[2] 限制实际无效，跨太平洋高延迟链路吞吐量严重受限；请重新运行 setup-server.sh 修复"
 fi
 
 # ── 17f. WireGuard UDP 套接字最小缓冲区 ────────────────────────────────────────
