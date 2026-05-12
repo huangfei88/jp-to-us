@@ -2,7 +2,7 @@
 # =============================================================================
 # 泄露检测脚本 — Linux 服务端
 # 检查：WireGuard 服务状态、NAT/转发规则、IPv4/IPv6 出口
-# 运行方式：bash verify/check-leak.sh
+# 运行方式：sudo bash verify/check-leak.sh
 # =============================================================================
 set -euo pipefail
 
@@ -14,6 +14,8 @@ info() { echo -e "${CYAN}[INFO]${NC} $*"; }
 
 FAILED=0
 WG_IFACE="wg0"
+
+[[ $EUID -ne 0 ]] && { echo -e "${RED}[ERROR]${NC} 请以 root 权限运行：sudo bash $0"; exit 1; }
 # WG_PORT：从实际运行的 wg0.conf 动态读取，消除与 setup-server.sh 的手动同步风险；
 # 若配置文件不存在（WireGuard 未安装），则沿用默认值 51820 使其他检测项仍可运行。
 WG_PORT=51820
