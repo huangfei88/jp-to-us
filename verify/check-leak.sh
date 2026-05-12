@@ -125,6 +125,11 @@ info "检查 ICMP redirect 设置..."
 SR=$(sysctl -n net.ipv4.conf.all.send_redirects 2>/dev/null || echo 1)
 [[ "$SR" == "0" ]] && pass "ICMP 重定向发送已禁用（路由表安全）" \
                    || fail "ICMP 重定向发送未禁用（可能干扰客户端路由）"
+# default.send_redirects：wg0 等动态接口继承 default；虽 all=0 已足够（内核需 all AND per-iface 均为 1 才发送），
+# 但显式验证 default 确认配置完整性
+SR_DEF=$(sysctl -n net.ipv4.conf.default.send_redirects 2>/dev/null || echo 1)
+[[ "$SR_DEF" == "0" ]] && pass "IPv4 default.send_redirects 已禁用（新建接口如 wg0 继承安全基线）" \
+                        || fail "IPv4 default.send_redirects 未禁用（当前值：${SR_DEF}，期望值 0）——新建接口将发送 ICMP 重定向，可能干扰客户端路由"
 
 AR=$(sysctl -n net.ipv4.conf.all.accept_redirects 2>/dev/null || echo 1)
 [[ "$AR" == "0" ]] && pass "ICMP 重定向接受已禁用（防路由表被远程劫持）" \
@@ -142,6 +147,14 @@ AR6=$(sysctl -n net.ipv6.conf.all.accept_redirects 2>/dev/null || echo 1)
 AR6DEF=$(sysctl -n net.ipv6.conf.default.accept_redirects 2>/dev/null || echo 1)
 [[ "$AR6DEF" == "0" ]] && pass "IPv6 default.accept_redirects 已禁用（新建接口继承安全基线）" \
                         || fail "IPv6 default.accept_redirects 未禁用（当前值：${AR6DEF}，期望值 0）——wg0 等动态接口创建后将接受 ICMPv6 重定向"
+
+# IPv6 发送重定向（send_redirects）：转发开启时内核隐式禁止，但显式设置确保安全基线
+SR6_ALL=$(sysctl -n net.ipv6.conf.all.send_redirects 2>/dev/null || echo 1)
+[[ "$SR6_ALL" == "0" ]] && pass "IPv6 ICMP 重定向发送已禁用（all.send_redirects=0）" \
+                         || fail "IPv6 ICMP 重定向发送未禁用（当前值：${SR6_ALL}，期望值 0）——虽启用 IPv6 转发时内核隐式禁用，但显式配置可防止安全基线被其他工具覆盖"
+SR6_DEF=$(sysctl -n net.ipv6.conf.default.send_redirects 2>/dev/null || echo 1)
+[[ "$SR6_DEF" == "0" ]] && pass "IPv6 default.send_redirects 已禁用（新建接口如 wg0 继承安全基线）" \
+                         || fail "IPv6 default.send_redirects 未禁用（当前值：${SR6_DEF}，期望值 0）——新建接口可能发送 ICMPv6 重定向"
 
 # ── 10. 反向路径过滤（rp_filter）──────────────────────────────────────────────
 info "检查反向路径过滤（rp_filter）..."
@@ -305,7 +318,29 @@ NO_METRICS=$(sysctl -n net.ipv4.tcp_no_metrics_save 2>/dev/null || echo 0)
     && pass "tcp_no_metrics_save 已启用（NAT 网关不缓存连接度量，避免跨太平洋坏度量污染新连接）" \
     || fail "tcp_no_metrics_save 未启用（当前 ${NO_METRICS}，期望值 1）——坏 TCP 度量（RTT/MSS/cwnd）将被重用于后续同目的 IP 的新连接，影响吞吐量"
 
-# ── 18. iptables 后端一致性（Debian 版本感知）──────────────────────────────────
+# ── 18. 内核模块开机自动加载持久化（企业级稳定性：重启后 sysctl 参数必须仍然生效）────────
+# systemd-sysctl.service 的 unit 文件中有 After=systemd-modules-load.service，
+# 确保 sysctl 在模块加载完成后才运行，所以只要模块在 /etc/modules-load.d/ 中配置，重启后参数即可生效
+info "检查内核模块开机自动加载配置..."
+if [[ -f /etc/modules-load.d/nf-conntrack.conf ]] && \
+   grep -q 'nf_conntrack' /etc/modules-load.d/nf-conntrack.conf 2>/dev/null; then
+    pass "nf_conntrack 已配置开机自动加载（/etc/modules-load.d/nf-conntrack.conf 存在）"
+else
+    fail "nf_conntrack 未配置开机自动加载——重启后 systemd-sysctl 在模块加载前运行，nf_conntrack_max 等 conntrack 参数静默失效，conntrack 表回退到默认值（约 65536），高并发 NAT 下将触发丢包；请重新运行 setup-server.sh 修复"
+fi
+
+if modinfo tcp_bbr &>/dev/null; then
+    if [[ -f /etc/modules-load.d/tcp-bbr.conf ]] && \
+       grep -q 'tcp_bbr' /etc/modules-load.d/tcp-bbr.conf 2>/dev/null; then
+        pass "tcp_bbr 已配置开机自动加载（/etc/modules-load.d/tcp-bbr.conf 存在）"
+    else
+        fail "tcp_bbr 已安装但未配置开机自动加载——重启后 BBR 拥塞控制将失效（退回 cubic），影响跨太平洋链路吞吐量；请重新运行 setup-server.sh 修复"
+    fi
+else
+    warn "tcp_bbr 模块不可用（内核版本过低），BBR 开机加载检测跳过（cubic 降级已生效）"
+fi
+
+# ── 19. iptables 后端一致性（Debian 版本感知）──────────────────────────────────
 # Debian 13+（Trixie）：正确后端是 iptables-nft（native nftables 框架）
 # Debian 11/12（Bullseye/Bookworm）：正确后端视 UFW 激活状态而定
 #   UFW 激活 → iptables-nft（与 UFW 一致）
@@ -352,7 +387,7 @@ if command -v update-alternatives &>/dev/null && \
     fi
 fi
 
-# ── 19. UFW 防火墙状态（Debian 专项）──────────────────────────────────────────
+# ── 20. UFW 防火墙状态（Debian 专项）──────────────────────────────────────────
 if command -v ufw &>/dev/null; then
     info "检查 UFW 状态（Debian 专项）..."
     if ufw status 2>/dev/null | grep -q "Status: active"; then

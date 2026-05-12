@@ -202,6 +202,9 @@ net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 net.ipv6.conf.all.accept_source_route = 0
 net.ipv6.conf.default.accept_source_route = 0
+# 禁止发送 IPv6 ICMP 重定向（转发开启时内核隐式禁用，但显式设置确保安全基线不受配置变更影响）
+net.ipv6.conf.all.send_redirects = 0
+net.ipv6.conf.default.send_redirects = 0
 
 # ── 软中断数据包预算（提升高负载吞吐量）──
 # 每次 NAPI poll 处理的最大数据包数（默认 300）——对高速 VPN 转发场景可提升吞吐量
@@ -227,6 +230,14 @@ if [[ -f /sys/module/nf_conntrack/parameters/hashsize ]]; then
 fi
 # 持久化：模块加载时自动设置 hashsize（重启后仍生效）
 echo "options nf_conntrack hashsize=${CONNTRACK_HASHSIZE}" > /etc/modprobe.d/nf-conntrack.conf
+# 开机自动加载：systemd-sysctl.service 的 unit 文件中有 After=systemd-modules-load.service，
+# 确保 sysctl 在模块加载完成后才运行。若缺少此配置，nf_conntrack 可能未加载，
+# nf_conntrack_max=524288 等参数静默失效，conntrack 表回退到内核默认值（约 65536），高并发 NAT 下将触发丢包
+echo "nf_conntrack" > /etc/modules-load.d/nf-conntrack.conf
+# tcp_bbr 同理：仅在模块可用时写入，内核不支持时跳过（脚本已有 cubic 降级逻辑）
+if modinfo tcp_bbr &>/dev/null; then
+    echo "tcp_bbr" > /etc/modules-load.d/tcp-bbr.conf
+fi
 
 # 检查 BBR 是否真正生效
 if sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
