@@ -209,10 +209,6 @@ net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 net.ipv6.conf.all.accept_source_route = 0
 net.ipv6.conf.default.accept_source_route = 0
-# 禁止发送 IPv6 ICMP 重定向（转发开启时内核隐式禁用，但显式设置确保安全基线不受配置变更影响）
-net.ipv6.conf.all.send_redirects = 0
-net.ipv6.conf.default.send_redirects = 0
-
 # ── 软中断数据包预算（提升高负载吞吐量）──
 # 每次 NAPI poll 处理的最大数据包数（默认 300）——对高速 VPN 转发场景可提升吞吐量
 # 防止网卡在大流量时因配额不足被频繁打断，减少 CPU 上下文切换
@@ -229,6 +225,16 @@ modprobe tcp_bbr 2>/dev/null || true
 # 预加载 nf_conntrack 模块，确保 sysctl 中的 nf_conntrack_max 等参数可写
 modprobe nf_conntrack 2>/dev/null || true
 sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
+
+# IPv6 send_redirects 在部分内核/容器环境中不存在（IPv6 转发开启时内核已隐式禁用）。
+# 条件写入：路径存在才设置并追加到持久化配置，避免 sysctl -p 在重启时因路径缺失而报错退出。
+# 注意：上方 heredoc 每次运行都完整覆写配置文件，此处的追加在同一次运行中最多执行一次，不会产生重复条目。
+for _P6SR in net.ipv6.conf.all.send_redirects net.ipv6.conf.default.send_redirects; do
+    if [[ -f "/proc/sys/$(printf '%s' "$_P6SR" | tr '.' '/')" ]]; then
+        sysctl -w "${_P6SR}=0" > /dev/null 2>&1 || true
+        echo "${_P6SR} = 0" >> /etc/sysctl.d/99-vpn-perf.conf
+    fi
+done
 
 # 设置 conntrack 哈希桶数（建议值 = nf_conntrack_max / 4）
 # hashsize 仅可在模块加载后通过 sysfs 写入，不走 sysctl

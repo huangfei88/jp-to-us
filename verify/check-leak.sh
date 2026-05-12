@@ -185,13 +185,34 @@ AR6DEF=$(sysctl -n net.ipv6.conf.default.accept_redirects 2>/dev/null || echo 1)
 [[ "$AR6DEF" == "0" ]] && pass "IPv6 default.accept_redirects 已禁用（新建接口继承安全基线）" \
                         || fail "IPv6 default.accept_redirects 未禁用（当前值：${AR6DEF}，期望值 0）——wg0 等动态接口创建后将接受 ICMPv6 重定向"
 
-# IPv6 发送重定向（send_redirects）：转发开启时内核隐式禁止，但显式设置确保安全基线
-SR6_ALL=$(sysctl -n net.ipv6.conf.all.send_redirects 2>/dev/null || echo 1)
-[[ "$SR6_ALL" == "0" ]] && pass "IPv6 ICMP 重定向发送已禁用（all.send_redirects=0）" \
-                         || fail "IPv6 ICMP 重定向发送未禁用（当前值：${SR6_ALL}，期望值 0）——虽启用 IPv6 转发时内核隐式禁用，但显式配置可防止安全基线被其他工具覆盖"
-SR6_DEF=$(sysctl -n net.ipv6.conf.default.send_redirects 2>/dev/null || echo 1)
-[[ "$SR6_DEF" == "0" ]] && pass "IPv6 default.send_redirects 已禁用（新建接口如 wg0 继承安全基线）" \
-                         || fail "IPv6 default.send_redirects 未禁用（当前值：${SR6_DEF}，期望值 0）——新建接口可能发送 ICMPv6 重定向"
+# IPv6 发送重定向（send_redirects）：转发开启时内核隐式禁止，但显式设置确保安全基线。
+# 注意：部分内核/容器环境不提供此 sysctl 路径；IPv6 转发（all.forwarding=1）启用时
+# 内核已隐式禁止发送 ICMPv6 重定向，此时路径不存在视为安全基线已满足（PASS）。
+# 若 IPv6 转发未启用且路径不存在，则标记为 WARN（状态不确定）。
+SR6_ALL=$(sysctl -n net.ipv6.conf.all.send_redirects 2>/dev/null)
+if [[ -z "$SR6_ALL" ]]; then
+    if [[ "$FWD6" == "1" ]]; then
+        pass "IPv6 all.send_redirects：sysctl 路径不存在，IPv6 转发已启用（all.forwarding=1）时内核隐式禁用，安全基线已满足"
+    else
+        warn "IPv6 all.send_redirects：sysctl 路径不存在且 IPv6 转发未启用——无法确认重定向发送状态"
+    fi
+elif [[ "$SR6_ALL" == "0" ]]; then
+    pass "IPv6 ICMP 重定向发送已禁用（all.send_redirects=0）"
+else
+    fail "IPv6 ICMP 重定向发送未禁用（当前值：${SR6_ALL}，期望值 0）——虽启用 IPv6 转发时内核隐式禁用，但显式配置可防止安全基线被其他工具覆盖"
+fi
+SR6_DEF=$(sysctl -n net.ipv6.conf.default.send_redirects 2>/dev/null)
+if [[ -z "$SR6_DEF" ]]; then
+    if [[ "$FWD6" == "1" ]]; then
+        pass "IPv6 default.send_redirects：sysctl 路径不存在，IPv6 转发已启用（all.forwarding=1）时内核隐式禁用，安全基线已满足"
+    else
+        warn "IPv6 default.send_redirects：sysctl 路径不存在且 IPv6 转发未启用——无法确认重定向发送状态"
+    fi
+elif [[ "$SR6_DEF" == "0" ]]; then
+    pass "IPv6 default.send_redirects 已禁用（新建接口如 wg0 继承安全基线）"
+else
+    fail "IPv6 default.send_redirects 未禁用（当前值：${SR6_DEF}，期望值 0）——新建接口可能发送 ICMPv6 重定向"
+fi
 
 # ── 10. 反向路径过滤（rp_filter）──────────────────────────────────────────────
 info "检查反向路径过滤（rp_filter）..."
