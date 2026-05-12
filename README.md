@@ -180,7 +180,8 @@ Start-Service "WireGuardTunnel`$jp-to-us-vpn"
 ## 注意事项
 
 1. **端口开放**：确保圣何塞服务器的安全组 / 防火墙开放了 UDP 51820 入站。
-2. **iptables-persistent**：若服务器重启后 NAT 规则丢失，运行
-   `apt install iptables-persistent && netfilter-persistent save`
+2. **iptables-persistent**（仅限 Debian 11/12 + UFW **未激活**时）：若服务器重启后 NAT 规则丢失，运行
+   `apt install iptables-persistent && netfilter-persistent save`。
+   Debian 13 (Trixie) 使用 UFW 时无需此操作——UFW 自动持久化所有规则；wg-quick PostUp/PostDown 动态管理 NAT/FORWARD，重启后随 `wg-quick@wg0` 服务自动重建。
 3. **WebRTC**：浏览器 WebRTC 可能泄露本地 IP，建议安装 uBlock Origin 并在设置中勾选「防止 WebRTC 泄露本地 IP」。
 4. **VPN 断线保护（Kill Switch）**：`setup-client.ps1` 已自动配置 Windows 防火墙 Kill Switch——VPN 断线时所有出站流量将被立即阻断，防止流量暴露真实日本 IP。以下流量已豁免：DHCP 更新（UDP 67，防止租约到期后失去 IP 导致 VPN 无法恢复）、NTP 时间同步（UDP 123，防止时钟漂移超过 180s 导致 WireGuard 握手失败）、链路本地地址（169.254.0.0/16、fe80::/10，保障邻居发现和 APIPA 正常工作）。卸载时运行 `.\setup-client.ps1 -Uninstall` 会自动清除相关规则。

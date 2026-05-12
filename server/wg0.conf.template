@@ -1,6 +1,13 @@
 # ============================================================
 # WireGuard Server 配置模板 — San Jose Linux
+# 适用：Debian 13 (Trixie) / Debian 11 (Bullseye) / Debian 12 (Bookworm)
 # 此文件由 setup-server.sh 自动生成，此处为参考模板
+#
+# iptables 命令说明：
+#   Debian 13+：iptables → iptables-nft（nftables 框架，UFW 同框架）
+#   Debian 11/12 + UFW 未激活：iptables-legacy（独立 xtables，与 netfilter-persistent 一致）
+#   Debian 11/12 + UFW 激活：iptables → iptables-nft（与 UFW 一致）
+#   setup-server.sh 会自动检测并在生成的实际 wg0.conf 中填入正确的全路径命令
 # ============================================================
 
 [Interface]
@@ -20,16 +27,21 @@ PostUp   = iptables  -A FORWARD -i wg0 -o <ETH_INTERFACE> -j ACCEPT
 PostUp   = iptables  -A FORWARD -i <ETH_INTERFACE> -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 PostUp   = ip6tables -A FORWARD -i wg0 -o <ETH_INTERFACE> -j ACCEPT
 PostUp   = ip6tables -A FORWARD -i <ETH_INTERFACE> -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostUp   = iptables  -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostUp   = ip6tables -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+# ── MSS 钳制：双向精确匹配（企业级必须，防止大包进隧道时分片卡死）──
+PostUp   = iptables  -A FORWARD -i wg0 -o <ETH_INTERFACE> -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = iptables  -A FORWARD -i <ETH_INTERFACE> -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ip6tables -A FORWARD -i wg0 -o <ETH_INTERFACE> -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp   = ip6tables -A FORWARD -i <ETH_INTERFACE> -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 PostDown = iptables  -t nat -D POSTROUTING -s 10.10.0.0/24  -o <ETH_INTERFACE> -j MASQUERADE
 PostDown = ip6tables -t nat -D POSTROUTING -s fd10:cafe::/64 -o <ETH_INTERFACE> -j MASQUERADE
 PostDown = iptables  -D FORWARD -i wg0 -o <ETH_INTERFACE> -j ACCEPT
 PostDown = iptables  -D FORWARD -i <ETH_INTERFACE> -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 PostDown = ip6tables -D FORWARD -i wg0 -o <ETH_INTERFACE> -j ACCEPT
 PostDown = ip6tables -D FORWARD -i <ETH_INTERFACE> -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostDown = iptables  -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip6tables -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables  -D FORWARD -i wg0 -o <ETH_INTERFACE> -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables  -D FORWARD -i <ETH_INTERFACE> -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip6tables -D FORWARD -i wg0 -o <ETH_INTERFACE> -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip6tables -D FORWARD -i <ETH_INTERFACE> -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # ── 客户端 Peer ─────────────────────────────────────────────
 [Peer]
