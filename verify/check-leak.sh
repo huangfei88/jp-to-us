@@ -59,7 +59,11 @@ FWD4=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)
 # ── 4. IPv6 转发 ──────────────────────────────────────────────────────────────
 info "检查 IPv6 转发..."
 FWD6=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo 0)
-[[ "$FWD6" == "1" ]] && pass "IPv6 转发已启用" || fail "IPv6 转发未启用（当前值：${FWD6}）"
+[[ "$FWD6" == "1" ]] && pass "IPv6 转发已启用（all.forwarding）" || fail "IPv6 转发未启用（当前值：${FWD6}）"
+# default.forwarding 为新建接口的基线值（wg0 每次 wg-quick up 新建，继承 default 而非 all）
+FWD6DEF=$(sysctl -n net.ipv6.conf.default.forwarding 2>/dev/null || echo 0)
+[[ "$FWD6DEF" == "1" ]] && pass "IPv6 default.forwarding 已启用（新建接口继承转发能力）" \
+                         || fail "IPv6 default.forwarding 未启用（当前值：${FWD6DEF}，期望值 1）——wg0 等动态接口创建后可能无法转发 IPv6 流量"
 
 # ── 5. NAT MASQUERADE 规则 ────────────────────────────────────────────────────
 info "检查 iptables NAT 规则..."
@@ -126,6 +130,14 @@ AR=$(sysctl -n net.ipv4.conf.all.accept_redirects 2>/dev/null || echo 1)
 [[ "$AR" == "0" ]] && pass "ICMP 重定向接受已禁用（防路由表被远程劫持）" \
                    || fail "ICMP 重定向接受未禁用（路由可能被远程重定向攻击劫持）"
 
+# IPv6 accept_redirects：与 IPv4 同等重要，防止 ICMPv6 重定向修改路由表
+AR6=$(sysctl -n net.ipv6.conf.all.accept_redirects 2>/dev/null || echo 1)
+[[ "$AR6" == "0" ]] && pass "IPv6 ICMP 重定向接受已禁用（防 ICMPv6 重定向路由劫持）" \
+                    || fail "IPv6 ICMP 重定向接受未禁用（当前值：${AR6}，期望值 0）——攻击者可通过 ICMPv6 重定向修改服务器路由表"
+AR6DEF=$(sysctl -n net.ipv6.conf.default.accept_redirects 2>/dev/null || echo 1)
+[[ "$AR6DEF" == "0" ]] && pass "IPv6 default.accept_redirects 已禁用（新建接口继承安全基线）" \
+                        || fail "IPv6 default.accept_redirects 未禁用（当前值：${AR6DEF}，期望值 0）——wg0 等动态接口创建后将接受 ICMPv6 重定向"
+
 # ── 10. 反向路径过滤（rp_filter）──────────────────────────────────────────────
 info "检查反向路径过滤（rp_filter）..."
 RP=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo 0)
@@ -159,6 +171,29 @@ if [[ "$FIN_TO" -le 30 ]]; then
     pass "TCP FIN 超时已调优（${FIN_TO}s，加速 TIME_WAIT 回收，减少 conntrack 压力）"
 else
     fail "TCP FIN 超时未调优（当前 ${FIN_TO}s，建议 ≤ 30s）——TIME_WAIT 条目长期堆积，conntrack 表更快耗尽"
+fi
+
+# ── 13b. TCP 半开连接 / 孤立连接参数 ─────────────────────────────────────────
+info "检查 TCP SYN-ACK 重传次数（tcp_synack_retries）..."
+SYNACK_R=$(sysctl -n net.ipv4.tcp_synack_retries 2>/dev/null || echo 5)
+if [[ "$SYNACK_R" -le 2 ]]; then
+    pass "tcp_synack_retries 已调优（${SYNACK_R}，半开连接约 7s 后清理，减轻 conntrack 压力）"
+else
+    fail "tcp_synack_retries 未调优（当前 ${SYNACK_R}，建议 ≤ 2）——默认 5 次约 63s 后才放弃，高并发时半开连接长期占据 conntrack 表"
+fi
+
+info "检查 TCP 孤立连接参数（tcp_orphan_retries / tcp_max_orphans）..."
+ORPHAN_R=$(sysctl -n net.ipv4.tcp_orphan_retries 2>/dev/null || echo 7)
+if [[ "$ORPHAN_R" -le 2 ]]; then
+    pass "tcp_orphan_retries 已调优（${ORPHAN_R}，孤立连接约 1s 后释放）"
+else
+    fail "tcp_orphan_retries 未调优（当前 ${ORPHAN_R}，建议 ≤ 2）——默认 7 次约 112s 后关闭，孤立连接长期占用 conntrack/内存资源"
+fi
+ORPHAN_MAX=$(sysctl -n net.ipv4.tcp_max_orphans 2>/dev/null || echo 4096)
+if [[ "$ORPHAN_MAX" -ge 32768 ]]; then
+    pass "tcp_max_orphans 已调优（${ORPHAN_MAX}，NAT 网关高并发下不触发孤立连接丢弃）"
+else
+    fail "tcp_max_orphans 过低（当前 ${ORPHAN_MAX}，建议 ≥ 32768）——触发 'TCP: too many orphaned sockets' 时新连接被静默拒绝"
 fi
 
 # ── 14. 服务端公网 IP ─────────────────────────────────────────────────────────
@@ -195,6 +230,31 @@ if [[ "$CT_EST" -le 3600 ]]; then
     pass "conntrack established 超时已调优（${CT_EST}s，失活连接 1 小时内回收）"
 else
     fail "conntrack established 超时过长（当前 ${CT_EST}s，默认 432000s/5天）——失活 TCP 连接长期占据 conntrack 表，高并发下快速耗尽"
+fi
+
+# conntrack TIME_WAIT / CLOSE_WAIT 加速回收
+CT_TW=$(sysctl -n net.netfilter.nf_conntrack_tcp_timeout_time_wait 2>/dev/null || echo 120)
+if [[ "$CT_TW" -le 30 ]]; then
+    pass "conntrack tcp_timeout_time_wait 已调优（${CT_TW}s，TIME_WAIT 条目快速回收）"
+else
+    fail "conntrack tcp_timeout_time_wait 过长（当前 ${CT_TW}s，建议 ≤ 30s）——TIME_WAIT 条目回收慢，conntrack 表加速耗尽"
+fi
+CT_CW=$(sysctl -n net.netfilter.nf_conntrack_tcp_timeout_close_wait 2>/dev/null || echo 60)
+if [[ "$CT_CW" -le 30 ]]; then
+    pass "conntrack tcp_timeout_close_wait 已调优（${CT_CW}s，CLOSE_WAIT 条目快速回收）"
+else
+    fail "conntrack tcp_timeout_close_wait 过长（当前 ${CT_CW}s，建议 ≤ 30s）——CLOSE_WAIT 条目回收慢"
+fi
+
+# WireGuard UDP 流超时（udp_timeout_stream）：必须显著大于 PersistentKeepalive（25s）
+# 要求 ≥ 50s（keepalive × 2）：若超时仅与 keepalive 间隔相近，任何轻微抖动或
+# 处理延迟都会导致 WireGuard UDP 会话在两次 keepalive 之间被从 conntrack 表删除，
+# 造成 NAT 映射消失，服务器向客户端的返回包被丢弃，隧道单方向断流
+CT_UDP_STREAM=$(sysctl -n net.netfilter.nf_conntrack_udp_timeout_stream 2>/dev/null || echo 30)
+if [[ "$CT_UDP_STREAM" -ge 50 ]]; then
+    pass "conntrack udp_timeout_stream 已调优（${CT_UDP_STREAM}s ≥ 50s，WireGuard keepalive=25s 的 2 倍安全边际）"
+else
+    fail "conntrack udp_timeout_stream 过短（当前 ${CT_UDP_STREAM}s，建议 ≥ 50s）——可能短于 WireGuard PersistentKeepalive 两次间隔，导致 NAT 映射消失、隧道返回包丢弃"
 fi
 
 # ── 16. WireGuard peer 状态 ───────────────────────────────────────────────────
