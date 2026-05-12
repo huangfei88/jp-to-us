@@ -31,8 +31,8 @@ MIN_NAT_PORT_COUNT=50000
 MIN_SOCKET_BUFFER_SIZE=67108864
 # WireGuard UDP 套接字最小缓冲区（字节）：64 KB = 65536，内存压力下保证 UDP 接收/发送不退化到 4096 默认值
 MIN_UDP_SOCKET_BUFFER=65536
-# NIC 接收队列最小深度：默认 1000 在 VPN 突发流量下极易触发队列溢出丢包
-MIN_NETDEV_BACKLOG=250000
+# NIC 接收队列推荐深度：默认 1000 在 VPN 突发流量下极易触发队列溢出丢包
+RECOMMENDED_NETDEV_BACKLOG=250000
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
@@ -305,9 +305,9 @@ else
     fail "conntrack tcp_timeout_close_wait 过长（当前 ${CT_CW}s，建议 ≤ 30s）——CLOSE_WAIT 条目回收慢"
 fi
 
-# WireGuard UDP 流超时（udp_timeout_stream）：需 ≥ 3× PersistentKeepalive（25s）= 75s
+# WireGuard UDP 流超时（udp_timeout_stream）：需 > 75s（即 3× PersistentKeepalive=25s）
 # 跨太平洋链路上 keepalive 包存在周期性丢包风险；若连续两个 keepalive（t=25, t=50）丢失，
-# 第三个 keepalive（t=75）仍需在超时前到达以维持 NAT 映射。
+# 第三个 keepalive（t=75）必须在超时触发前到达才能维持 NAT 映射（需 > 75s，而非 ≥ 75s）。
 # 推荐值 120s（4.8×）在充足安全边际与 conntrack 内存占用之间取得平衡。
 CT_UDP_STREAM=$(sysctl -n net.netfilter.nf_conntrack_udp_timeout_stream 2>/dev/null || echo 30)
 if [[ "$CT_UDP_STREAM" -ge 120 ]]; then
@@ -336,12 +336,19 @@ fi
 # ── 15c. conntrack hashsize（查找性能）────────────────────────────────────────
 info "检查 conntrack hashsize（哈希桶数量）..."
 CT_HASH=$(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo 0)
-# 期望值 = nf_conntrack_max / 4（建议比例），动态计算以跟随 CT_MAX 变化
-EXPECTED_HASH=$(( CT_MAX > 0 ? CT_MAX / 4 : DEFAULT_CONNTRACK_HASHSIZE ))
+# 期望值 = nf_conntrack_max / 4（建议比例），动态计算以跟随 CT_MAX 变化；
+# 若 CT_MAX 不可读（模块未加载），使用 DEFAULT_CONNTRACK_HASHSIZE 作为回退期望值
+if [[ "$CT_MAX" -gt 0 ]]; then
+    EXPECTED_HASH=$(( CT_MAX / 4 ))
+    EXPECTED_HASH_DESC="nf_conntrack_max/4=${EXPECTED_HASH}"
+else
+    EXPECTED_HASH="$DEFAULT_CONNTRACK_HASHSIZE"
+    EXPECTED_HASH_DESC="${DEFAULT_CONNTRACK_HASHSIZE}（nf_conntrack_max 不可读，使用默认期望值）"
+fi
 if [[ "$CT_HASH" -ge "$EXPECTED_HASH" ]]; then
-    pass "conntrack hashsize 已调优（${CT_HASH} ≥ nf_conntrack_max/4=${EXPECTED_HASH}，O(1) 查找性能）"
+    pass "conntrack hashsize 已调优（${CT_HASH} ≥ ${EXPECTED_HASH_DESC}，O(1) 查找性能）"
 elif [[ "$CT_HASH" -gt 0 ]]; then
-    warn "conntrack hashsize 偏低（当前 ${CT_HASH}，建议 ≥ ${EXPECTED_HASH} = nf_conntrack_max/4）——桶内链表过长，高负载下查找退化为 O(n)，引发延迟毛刺；请重新运行 setup-server.sh 修复"
+    warn "conntrack hashsize 偏低（当前 ${CT_HASH}，建议 ≥ ${EXPECTED_HASH_DESC}）——桶内链表过长，高负载下查找退化为 O(n)，引发延迟毛刺；请重新运行 setup-server.sh 修复"
 else
     warn "无法读取 conntrack hashsize（/sys/module/nf_conntrack/parameters/hashsize 不可访问）"
 fi
@@ -378,10 +385,10 @@ fi
 # WireGuard 隧道会产生突发批量 UDP 包；默认 1000 个位置在 1 Gbps 链路上不到 1 ms 就会溢出
 info "检查 NIC 接收队列深度（netdev_max_backlog）..."
 BACKLOG=$(sysctl -n net.core.netdev_max_backlog 2>/dev/null || echo 0)
-if [[ "$BACKLOG" -ge "$MIN_NETDEV_BACKLOG" ]]; then
+if [[ "$BACKLOG" -ge "$RECOMMENDED_NETDEV_BACKLOG" ]]; then
     pass "netdev_max_backlog 已调优（${BACKLOG}，VPN 突发包不会因 NIC 接收队列溢出而丢弃）"
 elif [[ "$BACKLOG" -gt 0 ]]; then
-    fail "netdev_max_backlog 过低（当前 ${BACKLOG}，建议 ≥ ${MIN_NETDEV_BACKLOG}）——默认 1000 在 VPN 突发流量下极易触发 NIC 入队溢出静默丢包；请重新运行 setup-server.sh 修复"
+    fail "netdev_max_backlog 过低（当前 ${BACKLOG}，建议 ≥ ${RECOMMENDED_NETDEV_BACKLOG}）——默认 1000 在 VPN 突发流量下极易触发 NIC 入队溢出静默丢包；请重新运行 setup-server.sh 修复"
 else
     warn "无法读取 netdev_max_backlog"
 fi
