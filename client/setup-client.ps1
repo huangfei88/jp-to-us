@@ -30,6 +30,40 @@ $WG_INSTALL_DIR = "$env:ProgramFiles\WireGuard"
 $WG_EXE         = "$WG_INSTALL_DIR\wireguard.exe"
 $WG_CONF_DIR    = "$env:ProgramData\WireGuard"
 
+# ── 提前捕获物理网关和管理 IP（WireGuard 修改路由表之前快照）────────────────────
+# 物理网关在 WireGuard 接管后仍留在路由表（只是 metric 较高），但此处提前捕获更可靠
+$_physGW    = $null   # 物理默认网关 IP
+$_physIfIdx = $null   # 物理网卡接口序号
+
+foreach ($_adp in (Get-NetAdapter | Where-Object {
+        $_.Status -eq "Up" -and
+        $_.InterfaceDescription -notlike "*WireGuard*" -and
+        $_.InterfaceDescription -notlike "*Hyper-V*" -and
+        $_.Name -notlike "*$WG_TUNNEL_NAME*" })) {
+    $_rt = Get-NetRoute -InterfaceIndex $_adp.InterfaceIndex -DestinationPrefix "0.0.0.0/0" `
+               -ErrorAction SilentlyContinue |
+           Sort-Object RouteMetric | Select-Object -First 1
+    if ($_rt -and $_rt.NextHop -and $_rt.NextHop -ne "0.0.0.0") {
+        $_physGW    = $_rt.NextHop
+        $_physIfIdx = $_adp.InterfaceIndex
+        break
+    }
+}
+
+# 抓取所有已建立（或近期）的 RDP 入站连接的客户端 IP，并转为 /24 网段
+# （包含 Established/TimeWait/CloseWait，覆盖正在使用及刚断开的管理连接）
+$_rdpMgmtNets = @(
+    (Get-NetTCPConnection -LocalPort 3389 -ErrorAction SilentlyContinue |
+     Where-Object {
+         $_.RemoteAddress -ne "0.0.0.0" -and $_.RemoteAddress -ne "127.0.0.1" -and
+         [System.Net.IPAddress]::TryParse($_.RemoteAddress, [ref]$null) -and
+         ([System.Net.IPAddress]::Parse($_.RemoteAddress).AddressFamily -eq
+          [System.Net.Sockets.AddressFamily]::InterNetwork)
+     } |
+     Select-Object -ExpandProperty RemoteAddress -Unique) |
+    ForEach-Object { ($_ -replace '\.\d{1,3}$', '.0') }   # /24 网络地址
+) | Sort-Object -Unique
+
 # ── 卸载模式 ──────────────────────────────────────────────────────────────────
 if ($Uninstall) {
     Write-Info "停止并移除 WireGuard 隧道..."
@@ -41,6 +75,13 @@ if ($Uninstall) {
     # 移除 Kill Switch 防火墙规则
     Remove-NetFirewallRule -Name "WG-KS-*" -ErrorAction SilentlyContinue | Out-Null
     Write-Info "Kill Switch 规则已清除。"
+    # 移除本次检测到的 RDP 管理直通路由（仅删除本脚本启动时检测并写入的 /24 持久路由）
+    if ($_physGW -and $_rdpMgmtNets.Count -gt 0) {
+        foreach ($_net in $_rdpMgmtNets) {
+            $null = & route delete "$_net" mask 255.255.255.0 $_physGW 2>&1
+        }
+        Write-Info "RDP 直通路由已清除。"
+    }
     Write-Info "卸载完成。"
     exit 0
 }
@@ -107,6 +148,44 @@ Write-Info "安装 WireGuard 隧道服务：$WG_TUNNEL_NAME"
 # 先停止旧实例（如果存在）
 & $WG_EXE /uninstalltunnelservice $WG_TUNNEL_NAME 2>$null
 Start-Sleep 1
+
+# ── RDP 管理直通路由（在 VPN 路由写入前持久化，确保管理连接不受影响）───────────
+# 根本原因：WireGuard 全隧道向路由表注入 0.0.0.0/1 + 128.0.0.0/1，所有出站包含
+# RDP 响应包均经 VPN 隧道转发，源 IP 变为 VPN 出口 IP；客户端收到源 IP 不符的
+# SYN-ACK，TCP 握手失败，RDP 连接立即断开。
+# 修复：为管理网段写入持久 /24 路由（最长前缀匹配，/24 > /1，无条件优先），
+# 响应包走物理网卡发出，源 IP 保持本机真实 IP，RDP 握手正常。
+if ($_physGW) {
+    if ($_rdpMgmtNets.Count -gt 0) {
+        Write-Info "写入 RDP 管理网段直通路由（物理网关：$_physGW）..."
+        foreach ($_net in $_rdpMgmtNets) {
+            $_routeOut = & route add "$_net" mask 255.255.255.0 $_physGW metric 1 -p 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Info "  ✓ $_net/24 → $_physGW（已持久化，重启后有效）"
+            } else {
+                Write-Warn "  持久化失败（$_net）：$_routeOut"
+                Write-Warn "  尝试写入临时路由..."
+                $_tmpErr = $null
+                New-NetRoute -DestinationPrefix "$_net/24" -NextHop $_physGW `
+                    -InterfaceIndex $_physIfIdx -RouteMetric 1 `
+                    -ErrorAction SilentlyContinue -ErrorVariable _tmpErr | Out-Null
+                if ($_tmpErr) {
+                    Write-Warn "  临时路由也写入失败：$_tmpErr — RDP 响应包可能仍经隧道转发，请检查权限。"
+                } else {
+                    Write-Warn "  ✓ 临时路由已写入（重启后失效，请排查持久化问题后重新运行脚本）"
+                }
+            }
+        }
+    } else {
+        Write-Warn @"
+未检测到活动 RDP 连接。VPN 启动后如需从新 IP 远程桌面，请在确认管理 IP 后
+以管理员 PowerShell 运行（将 1.2.3.0 替换为管理机 IP 所属 /24 网段地址）：
+  route add 1.2.3.0 mask 255.255.255.0 $_physGW metric 1 -p
+"@
+    }
+} else {
+    Write-Warn "无法获取物理网关，跳过 RDP 直通路由写入。RDP 可能因 VPN 路由变化而断开。"
+}
 
 & $WG_EXE /installtunnelservice $destConf
 Start-Sleep 3
