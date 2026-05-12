@@ -183,7 +183,10 @@ net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
 # UDP 跟踪超时（默认 30s/180s）
 net.netfilter.nf_conntrack_udp_timeout = 30
-net.netfilter.nf_conntrack_udp_timeout_stream = 60
+# WireGuard UDP 流超时：PersistentKeepalive=25s；需 ≥ 3× keepalive（75s）确保即使两个连续
+# keepalive 包在跨太平洋链路上丢失（t=25 和 t=50），第三个 keepalive（t=75）仍能在超时前到达。
+# 设为 120s（4.8×）提供充足冗余，防止 NAT 映射消失后返回包被单方向丢弃
+net.netfilter.nf_conntrack_udp_timeout_stream = 120
 
 # ── 路由安全 / 防 ICMP 劫持 ──
 net.ipv4.conf.all.rp_filter = 1

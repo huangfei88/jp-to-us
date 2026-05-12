@@ -2,7 +2,7 @@
 # =============================================================================
 # 泄露检测脚本 — Linux 服务端
 # 检查：WireGuard 服务状态、NAT/转发规则、IPv4/IPv6 出口
-# 运行方式：bash verify/check-leak.sh
+# 运行方式：sudo bash verify/check-leak.sh
 # =============================================================================
 set -euo pipefail
 
@@ -14,6 +14,8 @@ info() { echo -e "${CYAN}[INFO]${NC} $*"; }
 
 FAILED=0
 WG_IFACE="wg0"
+
+[[ $EUID -ne 0 ]] && { echo -e "${RED}[ERROR]${NC} 请以 root 权限运行：sudo bash $0"; exit 1; }
 # WG_PORT：从实际运行的 wg0.conf 动态读取，消除与 setup-server.sh 的手动同步风险；
 # 若配置文件不存在（WireGuard 未安装），则沿用默认值 51820 使其他检测项仍可运行。
 WG_PORT=51820
@@ -21,6 +23,18 @@ if [[ -f "/etc/wireguard/${WG_IFACE}.conf" ]]; then
     _CFG_PORT=$(grep -m1 '^ListenPort' "/etc/wireguard/${WG_IFACE}.conf" 2>/dev/null | awk '{print $NF}')
     [[ "$_CFG_PORT" =~ ^[0-9]+$ ]] && WG_PORT="$_CFG_PORT"
 fi
+
+# ── 性能阈值常量（与 setup-server.sh 中的 sysctl 配置保持一致）──────────────────
+# conntrack hashsize 回退期望值：当 CT_MAX 不可读时使用（正常运行时动态计算 CT_MAX/4）
+FALLBACK_CONNTRACK_HASHSIZE=131072
+# NAT 出口端口池最小可用数量：Linux 默认仅约 28000（32768-60999），高并发下易耗尽
+MIN_NAT_PORT_COUNT=50000
+# 套接字缓冲区最小值（字节）：64 MB = 67108864，适配高带宽延迟积（BDP）的跨太平洋链路
+MIN_SOCKET_BUFFER_SIZE=67108864
+# WireGuard UDP 套接字最小缓冲区（字节）：64 KB = 65536，内存压力下保证 UDP 接收/发送不退化到 4096 默认值
+MIN_UDP_SOCKET_BUFFER=65536
+# NIC 接收队列推荐深度：默认 1000 在 VPN 突发流量下极易触发队列溢出丢包
+RECOMMENDED_NETDEV_BACKLOG=250000
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
@@ -112,6 +126,24 @@ if [[ "$CC" == "bbr" ]]; then
     pass "BBR 已启用（高性能）"
 else
     warn "BBR 未启用（当前：${CC}）——建议升级内核以启用 BBR；cubic 为有效降级方案"
+fi
+
+# ── 7b. 网络队列调度器（default_qdisc）────────────────────────────────────────
+# BBR 依赖 fq（Fair Queueing）对数据包进行精确时序控制（BBR pacing）：
+#   - fq 为每条流维护独立 FIFO 子队列并按速率间隔发包，实现 BBR 设定的发送速率
+#   - pfifo_fast（Linux 默认）是一个三级优先级队列，所有流共用，无 pacing 能力
+#     → BBR 写入 cwnd 但无法控制间隔，大量包堆积在网卡队列，延迟毛刺显著增大
+#   - fq_codel 是 fq + CoDel 的组合，是 cubic 的推荐配套 qdisc
+# Debian 主线内核上可用的三种 FQ 调度器（穷举）：fq / fq_codel / cake。
+# sfq 等其他调度器不提供防缓冲区膨胀（CoDel/FQ pacing）能力，不在接受列表中。
+info "检查网络队列调度器（default_qdisc）..."
+QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+if [[ "$QDISC" == "fq" || "$QDISC" == "fq_codel" || "$QDISC" == "cake" ]]; then
+    pass "default_qdisc 已调优（${QDISC}，支持公平队列/BBR pacing，防跨太平洋缓冲区膨胀）"
+elif [[ "$QDISC" == "pfifo_fast" || "$QDISC" == "pfifo" || "$QDISC" == "bfifo" ]]; then
+    fail "default_qdisc 为 ${QDISC}（先进先出，无 pacing 能力）——BBR 无法控制发包间隔，跨太平洋链路上延迟毛刺显著；请重新运行 setup-server.sh 修复"
+else
+    warn "default_qdisc 为 ${QDISC}，非标准值；建议 fq（配合 BBR）或 fq_codel（配合 cubic）"
 fi
 
 # ── 8. TCP MTU 探测 ────────────────────────────────────────────────────────────
@@ -276,15 +308,67 @@ else
     fail "conntrack tcp_timeout_close_wait 过长（当前 ${CT_CW}s，建议 ≤ 30s）——CLOSE_WAIT 条目回收慢"
 fi
 
-# WireGuard UDP 流超时（udp_timeout_stream）：必须显著大于 PersistentKeepalive（25s）
-# 要求 ≥ 50s（keepalive × 2）：若超时仅与 keepalive 间隔相近，任何轻微抖动或
-# 处理延迟都会导致 WireGuard UDP 会话在两次 keepalive 之间被从 conntrack 表删除，
-# 造成 NAT 映射消失，服务器向客户端的返回包被丢弃，隧道单方向断流
+# WireGuard UDP 流超时（udp_timeout_stream）：理论最低值 > 75s（3× PersistentKeepalive=25s），
+# 实际检查分两档：≥ 120s（推荐值 / PASS）、60–119s（可运行但偏低 / WARN）、< 60s（风险高 / FAIL）。
+# 跨太平洋链路上 keepalive 包存在周期性丢包风险；若连续两个 keepalive（t=25, t=50）丢失，
+# 第三个 keepalive（t=75）必须在超时触发前到达才能维持 NAT 映射（需 > 75s）。
+# 推荐值 120s（4.8×）在充足安全边际与 conntrack 内存占用之间取得平衡。
 CT_UDP_STREAM=$(sysctl -n net.netfilter.nf_conntrack_udp_timeout_stream 2>/dev/null || echo 30)
-if [[ "$CT_UDP_STREAM" -ge 50 ]]; then
-    pass "conntrack udp_timeout_stream 已调优（${CT_UDP_STREAM}s ≥ 50s，WireGuard keepalive=25s 的 2 倍安全边际）"
+if [[ "$CT_UDP_STREAM" -ge 120 ]]; then
+    pass "conntrack udp_timeout_stream 已调优（${CT_UDP_STREAM}s ≥ 120s 推荐值，keepalive=25s 的 4.8× 安全边际）"
+elif [[ "$CT_UDP_STREAM" -ge 60 ]]; then
+    warn "conntrack udp_timeout_stream 偏低（当前 ${CT_UDP_STREAM}s，推荐 ≥ 120s）——当前值仅约 2.4× keepalive，跨太平洋链路两次连续 keepalive 丢包时 NAT 映射有消失风险；请重新运行 setup-server.sh 修复"
 else
-    fail "conntrack udp_timeout_stream 过短（当前 ${CT_UDP_STREAM}s，建议 ≥ 50s）——可能短于 WireGuard PersistentKeepalive 两次间隔，导致 NAT 映射消失、隧道返回包丢弃"
+    fail "conntrack udp_timeout_stream 过短（当前 ${CT_UDP_STREAM}s，推荐 120s / 最低 60s）——跨太平洋链路 keepalive 丢包时 NAT 映射可能提前消失，隧道返回包被单方向丢弃"
+fi
+
+# conntrack 单向 UDP 超时（udp_timeout）：控制仅看到单向流量的 UDP conntrack 条目生命周期
+# 典型场景：DNS 查询（客户端→1.1.1.1）发出后若短时间内未收到回复，条目已超时，
+# NAT 映射消失，回复包被视为"新包"并被 NAT 丢弃（INVALID 状态）。
+# 默认值 30s（Linux 内核默认），建议保持 ≤ 30s：时间越短，conntrack 内存回收越快。
+# 超过 30s 意味着大量短生命周期 UDP 流（DNS/NTP 等）的 conntrack 条目长期占用内存。
+CT_UDP_TIMEOUT=$(sysctl -n net.netfilter.nf_conntrack_udp_timeout 2>/dev/null || echo 0)
+if [[ "$CT_UDP_TIMEOUT" -le 30 && "$CT_UDP_TIMEOUT" -gt 0 ]]; then
+    pass "conntrack udp_timeout 已调优（${CT_UDP_TIMEOUT}s ≤ 30s，单向 UDP 条目快速回收，conntrack 内存使用最优）"
+elif [[ "$CT_UDP_TIMEOUT" -gt 30 ]]; then
+    fail "conntrack udp_timeout 过长（当前 ${CT_UDP_TIMEOUT}s，建议 ≤ 30s）——DNS/NTP 等短生命周期单向 UDP 流的 conntrack 条目长期占用内存，加速 conntrack 表耗尽；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 conntrack udp_timeout（模块未加载或内核不支持）"
+fi
+
+# ── 15b. conntrack 表使用率 ────────────────────────────────────────────────────
+info "检查 conntrack 表使用率..."
+if [[ "$CT_MAX" -gt 0 && "$CT_COUNT" != "N/A" ]]; then
+    CT_PCT=$(( CT_COUNT * 100 / CT_MAX ))
+    if [[ "$CT_PCT" -ge 80 ]]; then
+        fail "conntrack 表使用率危险（当前 ${CT_COUNT}/${CT_MAX}，${CT_PCT}%）——即将触发 conntrack 满表丢包；请立即排查连接泄漏或增大 nf_conntrack_max"
+    elif [[ "$CT_PCT" -ge 60 ]]; then
+        warn "conntrack 表使用率较高（当前 ${CT_COUNT}/${CT_MAX}，${CT_PCT}%）——建议监控流量增长趋势，必要时提前扩容"
+    else
+        pass "conntrack 表使用率正常（当前 ${CT_COUNT}/${CT_MAX}，${CT_PCT}%）"
+    fi
+else
+    warn "无法计算 conntrack 使用率（CT_MAX=${CT_MAX} CT_COUNT=${CT_COUNT}）"
+fi
+
+# ── 15c. conntrack hashsize（查找性能）────────────────────────────────────────
+info "检查 conntrack hashsize（哈希桶数量）..."
+CT_HASH=$(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo 0)
+# 期望值 = nf_conntrack_max / 4（建议比例），动态计算以跟随 CT_MAX 变化；
+# 若 CT_MAX 不可读（模块未加载），使用 FALLBACK_CONNTRACK_HASHSIZE 作为回退期望值
+if [[ "$CT_MAX" -gt 0 ]]; then
+    EXPECTED_HASH=$(( CT_MAX / 4 ))
+    EXPECTED_HASH_DESC="nf_conntrack_max/4=${EXPECTED_HASH}"
+else
+    EXPECTED_HASH=$FALLBACK_CONNTRACK_HASHSIZE
+    EXPECTED_HASH_DESC="${FALLBACK_CONNTRACK_HASHSIZE}（nf_conntrack_max 不可读，使用回退期望值）"
+fi
+if [[ "$CT_HASH" -ge "$EXPECTED_HASH" ]]; then
+    pass "conntrack hashsize 已调优（${CT_HASH} ≥ ${EXPECTED_HASH_DESC}，O(1) 查找性能）"
+elif [[ "$CT_HASH" -gt 0 ]]; then
+    warn "conntrack hashsize 偏低（当前 ${CT_HASH}，建议 ≥ ${EXPECTED_HASH_DESC}）——桶内链表过长，高负载下查找退化为 O(n)，引发延迟毛刺；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 conntrack hashsize（/sys/module/nf_conntrack/parameters/hashsize 不可访问）"
 fi
 
 # ── 16. WireGuard peer 状态 ───────────────────────────────────────────────────
@@ -312,11 +396,115 @@ else
     warn "无法读取 netdev_budget_usecs（内核 < 5.0 或参数不可用，可忽略）"
 fi
 
+# ── 17a. NIC 接收队列深度（netdev_max_backlog）────────────────────────────────
+# netdev_budget 控制每轮 softirq 处理的包数；netdev_max_backlog 控制 NIC 驱动向内核
+# 排队的最大包数。两者独立：backlog 过小时包在进入 softirq 处理之前就已被丢弃（pfifo_fast 限制），
+# 任何 budget/budget_usecs 调优都无济于事。
+# WireGuard 隧道会产生突发批量 UDP 包；默认 1000 个位置在 1 Gbps 链路上不到 1 ms 就会溢出
+info "检查 NIC 接收队列深度（netdev_max_backlog）..."
+BACKLOG=$(sysctl -n net.core.netdev_max_backlog 2>/dev/null || echo 0)
+if [[ "$BACKLOG" -ge "$RECOMMENDED_NETDEV_BACKLOG" ]]; then
+    pass "netdev_max_backlog 已调优（${BACKLOG}，VPN 突发包不会因 NIC 接收队列溢出而丢弃）"
+elif [[ "$BACKLOG" -gt 0 ]]; then
+    fail "netdev_max_backlog 过低（当前 ${BACKLOG}，建议 ≥ ${RECOMMENDED_NETDEV_BACKLOG}）——默认 1000 在 VPN 突发流量下极易触发 NIC 入队溢出静默丢包；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 netdev_max_backlog"
+fi
+
 info "检查 TCP 度量缓存禁用（tcp_no_metrics_save）..."
 NO_METRICS=$(sysctl -n net.ipv4.tcp_no_metrics_save 2>/dev/null || echo 0)
 [[ "$NO_METRICS" == "1" ]] \
     && pass "tcp_no_metrics_save 已启用（NAT 网关不缓存连接度量，避免跨太平洋坏度量污染新连接）" \
     || fail "tcp_no_metrics_save 未启用（当前 ${NO_METRICS}，期望值 1）——坏 TCP 度量（RTT/MSS/cwnd）将被重用于后续同目的 IP 的新连接，影响吞吐量"
+
+# ── 17b. NAT 出口端口范围（防端口耗尽）────────────────────────────────────────
+info "检查 NAT 出口端口范围（ip_local_port_range）..."
+PORT_RANGE=$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo "32768 60999")
+PORT_LOW=$(echo "$PORT_RANGE" | awk '{print $1}')
+PORT_HIGH=$(echo "$PORT_RANGE" | awk '{print $2}')
+PORT_COUNT=$(( PORT_HIGH - PORT_LOW + 1 ))
+# 核心判断：可用端口数量 ≥ MIN_NAT_PORT_COUNT（Linux 默认约 28000，高并发 NAT 易耗尽）
+if [[ "$PORT_COUNT" -ge "$MIN_NAT_PORT_COUNT" ]]; then
+    pass "NAT 出口端口范围充足（${PORT_LOW}-${PORT_HIGH}，共 ${PORT_COUNT} 个端口，防止高并发 NAT 端口耗尽）"
+else
+    fail "NAT 出口端口范围不足（当前 ${PORT_LOW}-${PORT_HIGH}，共 ${PORT_COUNT} 个端口）——默认范围仅约 28000 个端口，高并发 NAT 下易耗尽，导致新出站连接失败（EADDRINUSE）；请重新运行 setup-server.sh 修复"
+fi
+
+# ── 17c. TCP 慢启动恢复（空闲后性能）─────────────────────────────────────────
+info "检查 TCP 空闲慢启动（tcp_slow_start_after_idle）..."
+SLOW_START=$(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null || echo 1)
+[[ "$SLOW_START" == "0" ]] \
+    && pass "tcp_slow_start_after_idle 已禁用（跨太平洋链路空闲后恢复流量无降速惩罚）" \
+    || fail "tcp_slow_start_after_idle 未禁用（当前 ${SLOW_START}，期望值 0）——高延迟链路上 TCP 空闲后重启慢启动，流量恢复初始窗口极小，吞吐量骤降；对 VPN 隧道内周期性突发流量影响显著"
+
+# ── 17c-2. TCP Fast Open（tcp_fastopen）─────────────────────────────────────
+# tcp_fastopen=3（客户端+服务端双向开启）：
+#   SYN 包携带数据，服务端回复 SYN-ACK 时同步返回响应数据，消除 TCP 握手的额外 RTT
+#   对跨太平洋链路（RTT ~180 ms）：每次新连接可节省 ~180 ms 延迟
+#   - 值 0：TFO 完全禁用（默认）
+#   - 值 1：仅客户端模式（connect() 使用 TFO cookie 发送数据）
+#   - 值 2：仅服务端模式（accept() 接受 TFO 请求）
+#   - 值 3：双向模式（企业级 VPN 服务器最优，SSH 管理 + NAT 内部连接均受益）
+info "检查 TCP Fast Open（tcp_fastopen）..."
+TFO=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo 0)
+if [[ "$TFO" -eq 3 ]]; then
+    pass "TCP Fast Open 已启用（双向模式=3，新建连接节省 1 次 RTT，跨太平洋链路低延迟）"
+elif [[ "$TFO" -gt 0 ]]; then
+    warn "TCP Fast Open 部分启用（当前 ${TFO}，推荐 3 = 双向）——建议重新运行 setup-server.sh，将 tcp_fastopen 设为 3 以充分利用双向 TFO 节省跨太平洋高延迟链路的握手开销"
+else
+    fail "TCP Fast Open 未启用（当前 ${TFO}，期望 3）——每次新 TCP 连接额外消耗 ~180 ms 握手 RTT；请重新运行 setup-server.sh 修复"
+fi
+
+# ── 17d. TIME_WAIT 端口复用 ────────────────────────────────────────────────────
+info "检查 TCP TIME_WAIT 端口复用（tcp_tw_reuse）..."
+TW_REUSE=$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null || echo 0)
+[[ "$TW_REUSE" == "1" ]] \
+    && pass "tcp_tw_reuse 已启用（TIME_WAIT 端口可复用，减少 NAT 高并发下端口耗尽风险）" \
+    || fail "tcp_tw_reuse 未启用（当前 ${TW_REUSE}，期望值 1）——NAT 网关高并发下 TIME_WAIT 端口不可复用，出口端口耗尽风险增加；请重新运行 setup-server.sh 修复"
+
+# ── 17e. 套接字缓冲区（高 BDP 跨太平洋吞吐量）────────────────────────────────
+info "检查套接字缓冲区大小（rmem_max / wmem_max）..."
+RMEM_MAX=$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)
+WMEM_MAX=$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0)
+if [[ "$RMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" && "$WMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" ]]; then
+    pass "套接字缓冲区已调优（rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}，64 MB，适配高 BDP 跨太平洋链路）"
+else
+    fail "套接字缓冲区不足（rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}）——默认 ~200 KB 无法充分利用跨太平洋链路的带宽延迟积（BDP），吞吐量受限；请重新运行 setup-server.sh 修复"
+fi
+
+# ── 17e-2. TCP 自动调优上限（tcp_rmem / tcp_wmem max 字段）─────────────────────
+# net.core.rmem_max 是 SO_RCVBUF 的用户态硬上限；而 TCP 自动调优的上限由 tcp_rmem[2]（最大值字段）
+# 单独控制。内核 TCP 自动调优使用 min(tcp_rmem[2], rmem_max) 作为上界：
+#   - 若 tcp_rmem[2] = 4 MB（内核默认）而 rmem_max = 64 MB：自动调优被 tcp_rmem[2] 的 4 MB 锁死
+#   - 跨太平洋链路 RTT ~180 ms，BDP（100 Mbps）= 100 Mbps × 0.18 s = 22.5 MB；
+#     4 MB 缓冲区将实际吞吐量上限压缩至约 4 MB / 0.18 s ≈ 22 Mbps，哪怕 rmem_max = 64 MB 也无效
+#   - tcp_rmem[2] = tcp_wmem[2] = 64 MB 与 rmem_max/wmem_max 一致，TCP 自动调优才能充分利用
+#     大带宽延迟积（BDP）链路
+info "检查 TCP 自动调优上限（tcp_rmem max / tcp_wmem max）..."
+TCP_RMEM_MAX=$(sysctl -n net.ipv4.tcp_rmem 2>/dev/null | awk '{print $3}' || echo 0)
+TCP_WMEM_MAX=$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null | awk '{print $3}' || echo 0)
+# 确保为数值（awk 失败时可能为空）
+[[ "$TCP_RMEM_MAX" =~ ^[0-9]+$ ]] || TCP_RMEM_MAX=0
+[[ "$TCP_WMEM_MAX" =~ ^[0-9]+$ ]] || TCP_WMEM_MAX=0
+if [[ "$TCP_RMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" && "$TCP_WMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" ]]; then
+    pass "TCP 自动调优上限已调优（tcp_rmem max=${TCP_RMEM_MAX} tcp_wmem max=${TCP_WMEM_MAX}，rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}，全链路 BDP 可完整利用）"
+else
+    fail "TCP 自动调优上限不足（tcp_rmem max=${TCP_RMEM_MAX} tcp_wmem max=${TCP_WMEM_MAX}，期望 ≥ ${MIN_SOCKET_BUFFER_SIZE}）——rmem_max=64 MB 被 tcp_rmem[2] 限制实际无效，跨太平洋高延迟链路吞吐量严重受限；请重新运行 setup-server.sh 修复"
+fi
+
+# ── 17f. WireGuard UDP 套接字最小缓冲区 ────────────────────────────────────────
+# udp_rmem_min / udp_wmem_min 是 UDP 套接字在系统内存压力下保证的最小缓冲区大小。
+# 默认值 4096 字节（4 KB）：等于约 3 个 WireGuard 最大包（1420 B），高并发时极易触发
+# UDP 接收缓冲区溢出（ENOBUFS），WireGuard 内核模块静默丢弃进出包，隧道单向断流。
+# 65536 字节（64 KB）= 约 46 个 WireGuard 包的余量，保证突发高负载下不退化到极小缓冲区。
+info "检查 WireGuard UDP 套接字最小缓冲区（udp_rmem_min / udp_wmem_min）..."
+UDP_RMEM=$(sysctl -n net.ipv4.udp_rmem_min 2>/dev/null || echo 0)
+UDP_WMEM=$(sysctl -n net.ipv4.udp_wmem_min 2>/dev/null || echo 0)
+if [[ "$UDP_RMEM" -ge "$MIN_UDP_SOCKET_BUFFER" && "$UDP_WMEM" -ge "$MIN_UDP_SOCKET_BUFFER" ]]; then
+    pass "UDP 最小缓冲区已调优（udp_rmem_min=${UDP_RMEM} udp_wmem_min=${UDP_WMEM}，内存压力下 WireGuard UDP 套接字不会退化到 4 KB 默认缓冲区）"
+else
+    fail "UDP 最小缓冲区不足（udp_rmem_min=${UDP_RMEM} udp_wmem_min=${UDP_WMEM}，期望 ≥ ${MIN_UDP_SOCKET_BUFFER}）——默认 4096 字节在系统内存压力下会导致 WireGuard UDP 套接字丢包（ENOBUFS），隧道单向断流；请重新运行 setup-server.sh 修复"
+fi
 
 # ── 18. 内核模块开机自动加载持久化（企业级稳定性：重启后 sysctl 参数必须仍然生效）────────
 # systemd-sysctl.service 的 unit 文件中有 After=systemd-modules-load.service，
