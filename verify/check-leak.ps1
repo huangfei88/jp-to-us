@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     泄露检测脚本 — Windows 客户端
     检查：WireGuard 隧道状态、出口 IP、DNS 泄露、IPv6 泄露
