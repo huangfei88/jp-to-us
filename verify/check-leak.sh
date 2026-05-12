@@ -23,8 +23,8 @@ if [[ -f "/etc/wireguard/${WG_IFACE}.conf" ]]; then
 fi
 
 # ── 性能阈值常量（与 setup-server.sh 中的 sysctl 配置保持一致）──────────────────
-# conntrack hashsize 最小值 = nf_conntrack_max / 4；当 CT_MAX 不可读时使用此回退值
-DEFAULT_CONNTRACK_HASHSIZE=131072
+# conntrack hashsize 回退期望值：当 CT_MAX 不可读时使用（正常运行时动态计算 CT_MAX/4）
+FALLBACK_CONNTRACK_HASHSIZE=131072
 # NAT 出口端口池最小可用数量：Linux 默认仅约 28000（32768-60999），高并发下易耗尽
 MIN_NAT_PORT_COUNT=50000
 # 套接字缓冲区最小值（字节）：64 MB = 67108864，适配高带宽延迟积（BDP）的跨太平洋链路
@@ -305,9 +305,10 @@ else
     fail "conntrack tcp_timeout_close_wait 过长（当前 ${CT_CW}s，建议 ≤ 30s）——CLOSE_WAIT 条目回收慢"
 fi
 
-# WireGuard UDP 流超时（udp_timeout_stream）：需 > 75s（即 3× PersistentKeepalive=25s）
+# WireGuard UDP 流超时（udp_timeout_stream）：理论最低值 > 75s（3× PersistentKeepalive=25s），
+# 实际检查分两档：≥ 120s（推荐值 / PASS）、60–119s（可运行但偏低 / WARN）、< 60s（风险高 / FAIL）。
 # 跨太平洋链路上 keepalive 包存在周期性丢包风险；若连续两个 keepalive（t=25, t=50）丢失，
-# 第三个 keepalive（t=75）必须在超时触发前到达才能维持 NAT 映射（需 > 75s，而非 ≥ 75s）。
+# 第三个 keepalive（t=75）必须在超时触发前到达才能维持 NAT 映射（需 > 75s）。
 # 推荐值 120s（4.8×）在充足安全边际与 conntrack 内存占用之间取得平衡。
 CT_UDP_STREAM=$(sysctl -n net.netfilter.nf_conntrack_udp_timeout_stream 2>/dev/null || echo 30)
 if [[ "$CT_UDP_STREAM" -ge 120 ]]; then
@@ -337,13 +338,13 @@ fi
 info "检查 conntrack hashsize（哈希桶数量）..."
 CT_HASH=$(cat /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || echo 0)
 # 期望值 = nf_conntrack_max / 4（建议比例），动态计算以跟随 CT_MAX 变化；
-# 若 CT_MAX 不可读（模块未加载），使用 DEFAULT_CONNTRACK_HASHSIZE 作为回退期望值
+# 若 CT_MAX 不可读（模块未加载），使用 FALLBACK_CONNTRACK_HASHSIZE 作为回退期望值
 if [[ "$CT_MAX" -gt 0 ]]; then
     EXPECTED_HASH=$(( CT_MAX / 4 ))
     EXPECTED_HASH_DESC="nf_conntrack_max/4=${EXPECTED_HASH}"
 else
-    EXPECTED_HASH="$DEFAULT_CONNTRACK_HASHSIZE"
-    EXPECTED_HASH_DESC="${DEFAULT_CONNTRACK_HASHSIZE}（nf_conntrack_max 不可读，使用默认期望值）"
+    EXPECTED_HASH="$FALLBACK_CONNTRACK_HASHSIZE"
+    EXPECTED_HASH_DESC="${FALLBACK_CONNTRACK_HASHSIZE}（nf_conntrack_max 不可读，使用回退期望值）"
 fi
 if [[ "$CT_HASH" -ge "$EXPECTED_HASH" ]]; then
     pass "conntrack hashsize 已调优（${CT_HASH} ≥ ${EXPECTED_HASH_DESC}，O(1) 查找性能）"
