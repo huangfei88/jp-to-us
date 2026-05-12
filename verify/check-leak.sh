@@ -29,6 +29,10 @@ DEFAULT_CONNTRACK_HASHSIZE=131072
 MIN_NAT_PORT_COUNT=50000
 # 套接字缓冲区最小值（字节）：64 MB = 67108864，适配高带宽延迟积（BDP）的跨太平洋链路
 MIN_SOCKET_BUFFER_SIZE=67108864
+# WireGuard UDP 套接字最小缓冲区（字节）：64 KB = 65536，内存压力下保证 UDP 接收/发送不退化到 4096 默认值
+MIN_UDP_SOCKET_BUFFER=65536
+# NIC 接收队列最小深度：默认 1000 在 VPN 突发流量下极易触发队列溢出丢包
+MIN_NETDEV_BACKLOG=250000
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
@@ -120,6 +124,23 @@ if [[ "$CC" == "bbr" ]]; then
     pass "BBR 已启用（高性能）"
 else
     warn "BBR 未启用（当前：${CC}）——建议升级内核以启用 BBR；cubic 为有效降级方案"
+fi
+
+# ── 7b. 网络队列调度器（default_qdisc）────────────────────────────────────────
+# BBR 依赖 fq（Fair Queueing）对数据包进行精确时序控制（BBR pacing）：
+#   - fq 为每条流维护独立 FIFO 子队列并按速率间隔发包，实现 BBR 设定的发送速率
+#   - pfifo_fast（Linux 默认）是一个三级优先级队列，所有流共用，无 pacing 能力
+#     → BBR 写入 cwnd 但无法控制间隔，大量包堆积在网卡队列，延迟毛刺显著增大
+#   - fq_codel 是 fq + CoDel 的组合，是 cubic 的推荐配套 qdisc
+# 任何含 fq 语义的 qdisc（fq、fq_codel、cake）均可接受；pfifo*/bfifo 导致缓冲区膨胀
+info "检查网络队列调度器（default_qdisc）..."
+QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+if [[ "$QDISC" == "fq" || "$QDISC" == "fq_codel" || "$QDISC" == "cake" ]]; then
+    pass "default_qdisc 已调优（${QDISC}，支持公平队列 / BBR pacing，防跨太平洋缓冲区膨胀）"
+elif [[ "$QDISC" == "pfifo_fast" || "$QDISC" == "pfifo" || "$QDISC" == "bfifo" ]]; then
+    fail "default_qdisc 为 ${QDISC}（先进先出，无 pacing 能力）——BBR 无法控制发包间隔，跨太平洋链路上延迟毛刺显著；请重新运行 setup-server.sh 修复"
+else
+    warn "default_qdisc 为 ${QDISC}，非标准值；建议 fq（配合 BBR）或 fq_codel（配合 cubic）"
 fi
 
 # ── 8. TCP MTU 探测 ────────────────────────────────────────────────────────────
@@ -350,6 +371,21 @@ else
     warn "无法读取 netdev_budget_usecs（内核 < 5.0 或参数不可用，可忽略）"
 fi
 
+# ── 17a. NIC 接收队列深度（netdev_max_backlog）────────────────────────────────
+# netdev_budget 控制每轮 softirq 处理的包数；netdev_max_backlog 控制 NIC 驱动向内核
+# 排队的最大包数。两者独立：backlog 过小时包在进入 softirq 处理之前就已被丢弃（pfifo_fast 限制），
+# 任何 budget/budget_usecs 调优都无济于事。
+# WireGuard 隧道会产生突发批量 UDP 包；默认 1000 个位置在 1 Gbps 链路上不到 1 ms 就会溢出
+info "检查 NIC 接收队列深度（netdev_max_backlog）..."
+BACKLOG=$(sysctl -n net.core.netdev_max_backlog 2>/dev/null || echo 0)
+if [[ "$BACKLOG" -ge "$MIN_NETDEV_BACKLOG" ]]; then
+    pass "netdev_max_backlog 已调优（${BACKLOG}，VPN 突发包不会因 NIC 接收队列溢出而丢弃）"
+elif [[ "$BACKLOG" -gt 0 ]]; then
+    fail "netdev_max_backlog 过低（当前 ${BACKLOG}，建议 ≥ ${MIN_NETDEV_BACKLOG}）——默认 1000 在 VPN 突发流量下极易触发 NIC 入队溢出静默丢包；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 netdev_max_backlog"
+fi
+
 info "检查 TCP 度量缓存禁用（tcp_no_metrics_save）..."
 NO_METRICS=$(sysctl -n net.ipv4.tcp_no_metrics_save 2>/dev/null || echo 0)
 [[ "$NO_METRICS" == "1" ]] \
@@ -391,6 +427,20 @@ if [[ "$RMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" && "$WMEM_MAX" -ge "$MIN_SOCKET_
     pass "套接字缓冲区已调优（rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}，64 MB，适配高 BDP 跨太平洋链路）"
 else
     fail "套接字缓冲区不足（rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}）——默认 ~200 KB 无法充分利用跨太平洋链路的带宽延迟积（BDP），吞吐量受限；请重新运行 setup-server.sh 修复"
+fi
+
+# ── 17f. WireGuard UDP 套接字最小缓冲区 ────────────────────────────────────────
+# udp_rmem_min / udp_wmem_min 是 UDP 套接字在系统内存压力下保证的最小缓冲区大小。
+# 默认值 4096 字节（4 KB）：等于约 3 个 WireGuard 最大包（1420 B），高并发时极易触发
+# UDP 接收缓冲区溢出（ENOBUFS），WireGuard 内核模块静默丢弃进出包，隧道单向断流。
+# 65536 字节（64 KB）= 约 46 个 WireGuard 包的余量，保证突发高负载下不退化到极小缓冲区。
+info "检查 WireGuard UDP 套接字最小缓冲区（udp_rmem_min / udp_wmem_min）..."
+UDP_RMEM=$(sysctl -n net.ipv4.udp_rmem_min 2>/dev/null || echo 0)
+UDP_WMEM=$(sysctl -n net.ipv4.udp_wmem_min 2>/dev/null || echo 0)
+if [[ "$UDP_RMEM" -ge "$MIN_UDP_SOCKET_BUFFER" && "$UDP_WMEM" -ge "$MIN_UDP_SOCKET_BUFFER" ]]; then
+    pass "UDP 最小缓冲区已调优（udp_rmem_min=${UDP_RMEM} udp_wmem_min=${UDP_WMEM}，内存压力下 WireGuard UDP 套接字不会退化到 4 KB 默认缓冲区）"
+else
+    fail "UDP 最小缓冲区不足（udp_rmem_min=${UDP_RMEM} udp_wmem_min=${UDP_WMEM}，期望 ≥ ${MIN_UDP_SOCKET_BUFFER}）——默认 4096 字节在系统内存压力下会导致 WireGuard UDP 套接字丢包（ENOBUFS），隧道单向断流；请重新运行 setup-server.sh 修复"
 fi
 
 # ── 18. 内核模块开机自动加载持久化（企业级稳定性：重启后 sysctl 参数必须仍然生效）────────
