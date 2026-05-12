@@ -235,6 +235,19 @@ else
     fail "TCP FIN 超时未调优（当前 ${FIN_TO}s，建议 ≤ 30s）——TIME_WAIT 条目长期堆积，conntrack 表更快耗尽"
 fi
 
+# ── 13a. TIME_WAIT 桶上限（防高并发 NAT 下桶溢出）────────────────────────────
+# 默认约 8192；溢出时内核直接销毁 TIME_WAIT 套接字，
+# 新连接复用同一四元组时可能收到残留 RST（"TCP: time wait bucket table overflow"）
+info "检查 TIME_WAIT 桶上限（tcp_max_tw_buckets）..."
+TW_BUCKETS=$(sysctl -n net.ipv4.tcp_max_tw_buckets 2>/dev/null || echo 0)
+if [[ "$TW_BUCKETS" -ge 65536 ]]; then
+    pass "tcp_max_tw_buckets 已调优（${TW_BUCKETS}，高并发 NAT 下 TIME_WAIT 桶不会溢出）"
+elif [[ "$TW_BUCKETS" -gt 0 ]]; then
+    fail "tcp_max_tw_buckets 过低（当前 ${TW_BUCKETS}，建议 ≥ 65536）——高并发下 TIME_WAIT 桶溢出，内核强制销毁 TIME_WAIT 条目，新连接复用同一四元组时可能收到残留 RST；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 tcp_max_tw_buckets"
+fi
+
 # ── 13b. TCP 半开连接 / 孤立连接参数 ─────────────────────────────────────────
 info "检查 TCP SYN-ACK 重传次数（tcp_synack_retries）..."
 SYNACK_R=$(sysctl -n net.ipv4.tcp_synack_retries 2>/dev/null || echo 5)

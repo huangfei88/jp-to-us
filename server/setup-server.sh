@@ -170,6 +170,10 @@ net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
 # TIME_WAIT 状态超时（默认 60s），减少 conntrack 条目长期占用
 net.ipv4.tcp_fin_timeout = 30
+# TIME_WAIT 桶上限：防止高并发 NAT 下桶溢出后内核强制销毁 TIME_WAIT 条目
+# 默认约 8192，高并发时极易耗尽；溢出时内核直接销毁 TIME_WAIT 套接字，
+# 可能导致新连接复用同一四元组时收到残留 RST（"TCP: time wait bucket table overflow"）
+net.ipv4.tcp_max_tw_buckets = 262144
 
 # ── conntrack（NAT VPN 连接跟踪表，防止满表丢包）──
 # 默认值通常为 65536–131072，全流量 NAT VPN 高并发时极易耗尽
