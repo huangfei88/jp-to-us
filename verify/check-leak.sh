@@ -35,6 +35,11 @@ MIN_SOCKET_BUFFER_SIZE=67108864
 MIN_UDP_SOCKET_BUFFER=65536
 # NIC 接收队列推荐深度：默认 1000 在 VPN 突发流量下极易触发队列溢出丢包
 RECOMMENDED_NETDEV_BACKLOG=250000
+# TIME_WAIT 桶最小数量：默认约 8192，高并发 NAT 下极易耗尽导致残留 RST
+MIN_TW_BUCKETS=65536
+# 套接字默认缓冲区最小值（字节）：1 MB = 1048576，影响 WireGuard UDP 套接字初始接收容量
+# UDP 不像 TCP 有自动调优，若 rmem_default 未设置到 1 MB，突发时更依赖 udp_rmem_min 保护
+MIN_SOCKET_BUFFER_DEFAULT=1048576
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
@@ -233,6 +238,19 @@ if [[ "$FIN_TO" -le 30 ]]; then
     pass "TCP FIN 超时已调优（${FIN_TO}s，加速 TIME_WAIT 回收，减少 conntrack 压力）"
 else
     fail "TCP FIN 超时未调优（当前 ${FIN_TO}s，建议 ≤ 30s）——TIME_WAIT 条目长期堆积，conntrack 表更快耗尽"
+fi
+
+# ── 13a. TIME_WAIT 桶上限（防高并发 NAT 下桶溢出）────────────────────────────
+# 默认约 8192；溢出时内核直接销毁 TIME_WAIT 套接字，
+# 新连接复用同一四元组时可能收到残留 RST（"TCP: time wait bucket table overflow"）
+info "检查 TIME_WAIT 桶上限（tcp_max_tw_buckets）..."
+TW_BUCKETS=$(sysctl -n net.ipv4.tcp_max_tw_buckets 2>/dev/null || echo 0)
+if [[ "$TW_BUCKETS" -ge "$MIN_TW_BUCKETS" ]]; then
+    pass "tcp_max_tw_buckets 已调优（${TW_BUCKETS}，高并发 NAT 下 TIME_WAIT 桶不会溢出）"
+elif [[ "$TW_BUCKETS" -gt 0 ]]; then
+    fail "tcp_max_tw_buckets 过低（当前 ${TW_BUCKETS}，建议 ≥ ${MIN_TW_BUCKETS}）——高并发下 TIME_WAIT 桶溢出，内核强制销毁 TIME_WAIT 条目，新连接复用同一四元组时可能收到残留 RST；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 tcp_max_tw_buckets"
 fi
 
 # ── 13b. TCP 半开连接 / 孤立连接参数 ─────────────────────────────────────────
@@ -490,6 +508,24 @@ if [[ "$TCP_RMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" && "$TCP_WMEM_MAX" -ge "$MIN
     pass "TCP 自动调优上限已调优（tcp_rmem max=${TCP_RMEM_MAX} tcp_wmem max=${TCP_WMEM_MAX}，rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}，全链路 BDP 可完整利用）"
 else
     fail "TCP 自动调优上限不足（tcp_rmem max=${TCP_RMEM_MAX} tcp_wmem max=${TCP_WMEM_MAX}，期望 ≥ ${MIN_SOCKET_BUFFER_SIZE}）——rmem_max=64 MB 被 tcp_rmem[2] 限制实际无效，跨太平洋高延迟链路吞吐量严重受限；请重新运行 setup-server.sh 修复"
+fi
+
+# ── 17e-3. 套接字默认缓冲区（rmem_default / wmem_default）──────────────────────
+# net.core.rmem_default / wmem_default：新建套接字的初始缓冲区大小（尚未经 TCP 自动调优）。
+# Linux 内核默认约 212992 字节（~200 KB）。
+# 对 WireGuard UDP 套接字尤为重要：UDP 没有 TCP 的自动调优机制（setsockopt SO_RCVBUF
+# 也受 rmem_max 限制），初始分配即是实际分配。若 rmem_default 过小，突发流量下
+# WireGuard UDP 接收队列迅速填满（Linux 默认 ~200 KB ÷ 1420 B ≈ 140 个包），
+# 触发 ENOBUFS 静默丢包，隧道出现单向数据传输中断。
+# 设为 1 MB（1048576 字节）：约容纳 738 个 WireGuard 最大包，与 udp_rmem_min=64 KB
+# 和 rmem_max=64 MB 形成完整的三层缓冲保护（min / default / max）。
+info "检查套接字默认缓冲区（rmem_default / wmem_default）..."
+RMEM_DEF=$(sysctl -n net.core.rmem_default 2>/dev/null || echo 0)
+WMEM_DEF=$(sysctl -n net.core.wmem_default 2>/dev/null || echo 0)
+if [[ "$RMEM_DEF" -ge "$MIN_SOCKET_BUFFER_DEFAULT" && "$WMEM_DEF" -ge "$MIN_SOCKET_BUFFER_DEFAULT" ]]; then
+    pass "套接字默认缓冲区已调优（rmem_default=${RMEM_DEF} wmem_default=${WMEM_DEF}，1 MB 初始分配，WireGuard UDP 突发包不会因初始队列过小丢包）"
+else
+    fail "套接字默认缓冲区不足（rmem_default=${RMEM_DEF} wmem_default=${WMEM_DEF}，期望 ≥ ${MIN_SOCKET_BUFFER_DEFAULT}）——WireGuard UDP 套接字初始接收容量仅约 140 个包，突发流量下触发 ENOBUFS 静默丢包；请重新运行 setup-server.sh 修复"
 fi
 
 # ── 17f. WireGuard UDP 套接字最小缓冲区 ────────────────────────────────────────
