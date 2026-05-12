@@ -176,6 +176,10 @@ if ($_physGW) {
           Where-Object { $_ -match '\S' }) | ForEach-Object {
             $null = & route delete "$_" mask 255.255.255.0 2>&1
         }
+        # 消费完毕后立即删除状态文件：确保状态始终与实际路由表一致。
+        # 若新路由成功写入，后续 Out-File 会重建此文件；若无新路由（else 分支），文件保持不存在，
+        # 避免 -Uninstall 重复尝试删除已不存在的路由（虽无害但影响日志可读性）。
+        Remove-Item $_stateFile -Force -ErrorAction SilentlyContinue
     }
 
     if ($_rdpMgmtNets.Count -gt 0) {
@@ -206,7 +210,7 @@ if ($_physGW) {
         # 保存已写入的旁路路由到状态文件，供 -Uninstall 精确清理使用
         # $WG_CONF_DIR 已在步骤 2 由 New-Item -Force 创建，此处直接写入
         if ($_writtenNets.Count -gt 0) {
-            $_writtenNets | Out-File "$WG_CONF_DIR\rdp-bypass-routes.txt" -Encoding ASCII -Force -ErrorAction SilentlyContinue
+            $_writtenNets | Out-File $_stateFile -Encoding ASCII -Force -ErrorAction SilentlyContinue
         }
     } else {
         Write-Warn @"
