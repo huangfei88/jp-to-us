@@ -76,14 +76,18 @@ sudo bash server/setup-server.sh
 ### 步骤 2：配置 Windows 客户端（大阪）
 
 1. 将 `client-wg0.conf`（从服务端复制过来的）重命名为 `wg-client.conf`，
-   放到与 `setup-client.ps1` 相同目录。
+   放到解压目录下的 `client\` 子目录中（即与 `setup-client.ps1` 同级）。
 
-2. 以**管理员身份**运行 PowerShell，执行：
+2. 以**管理员身份**运行 PowerShell，**先 `cd` 到解压根目录**，再执行：
 
 ```powershell
+cd C:\jp-to-us-main
 Set-ExecutionPolicy Bypass -Scope Process -Force
 .\client\setup-client.ps1
 ```
+
+> **注意**：必须从 `jp-to-us-main`（根目录）运行，而非从 `client\` 子目录内运行。
+> 若已在 `client\` 目录内，请改用 `.\setup-client.ps1`。
 
 脚本将自动完成：
 - 下载并安装 WireGuard for Windows
@@ -172,7 +176,7 @@ Stop-Service  "WireGuardTunnel`$jp-to-us-vpn"
 # 启动 VPN
 Start-Service "WireGuardTunnel`$jp-to-us-vpn"
 
-# 卸载
+# 卸载（从解压根目录 jp-to-us-main 运行）
 .\client\setup-client.ps1 -Uninstall
 ```
 
