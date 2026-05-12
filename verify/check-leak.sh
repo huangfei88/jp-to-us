@@ -137,7 +137,7 @@ fi
 info "检查网络队列调度器（default_qdisc）..."
 QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
 if [[ "$QDISC" == "fq" || "$QDISC" == "fq_codel" || "$QDISC" == "cake" ]]; then
-    pass "default_qdisc 已调优（${QDISC}，支持公平队列 / BBR pacing，防跨太平洋缓冲区膨胀）"
+    pass "default_qdisc 已调优（${QDISC}，支持公平队列/BBR pacing，防跨太平洋缓冲区膨胀）"
 elif [[ "$QDISC" == "pfifo_fast" || "$QDISC" == "pfifo" || "$QDISC" == "bfifo" ]]; then
     fail "default_qdisc 为 ${QDISC}（先进先出，无 pacing 能力）——BBR 无法控制发包间隔，跨太平洋链路上延迟毛刺显著；请重新运行 setup-server.sh 修复"
 else
@@ -358,7 +358,7 @@ if [[ "$CT_MAX" -gt 0 ]]; then
     EXPECTED_HASH=$(( CT_MAX / 4 ))
     EXPECTED_HASH_DESC="nf_conntrack_max/4=${EXPECTED_HASH}"
 else
-    EXPECTED_HASH=$(( FALLBACK_CONNTRACK_HASHSIZE + 0 ))
+    EXPECTED_HASH=$FALLBACK_CONNTRACK_HASHSIZE
     EXPECTED_HASH_DESC="${FALLBACK_CONNTRACK_HASHSIZE}（nf_conntrack_max 不可读，使用回退期望值）"
 fi
 if [[ "$CT_HASH" -ge "$EXPECTED_HASH" ]]; then
@@ -485,7 +485,7 @@ TCP_WMEM_MAX=$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null | awk '{print $3}' || ech
 [[ "$TCP_RMEM_MAX" =~ ^[0-9]+$ ]] || TCP_RMEM_MAX=0
 [[ "$TCP_WMEM_MAX" =~ ^[0-9]+$ ]] || TCP_WMEM_MAX=0
 if [[ "$TCP_RMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" && "$TCP_WMEM_MAX" -ge "$MIN_SOCKET_BUFFER_SIZE" ]]; then
-    pass "TCP 自动调优上限已调优（tcp_rmem max=${TCP_RMEM_MAX} tcp_wmem max=${TCP_WMEM_MAX}，与 rmem_max/wmem_max 一致，BDP 可完整利用）"
+    pass "TCP 自动调优上限已调优（tcp_rmem max=${TCP_RMEM_MAX} tcp_wmem max=${TCP_WMEM_MAX}，rmem_max=${RMEM_MAX} wmem_max=${WMEM_MAX}，全链路 BDP 可完整利用）"
 else
     fail "TCP 自动调优上限不足（tcp_rmem max=${TCP_RMEM_MAX} tcp_wmem max=${TCP_WMEM_MAX}，期望 ≥ ${MIN_SOCKET_BUFFER_SIZE}）——rmem_max=64 MB 被 tcp_rmem[2] 限制实际无效，跨太平洋高延迟链路吞吐量严重受限；请重新运行 setup-server.sh 修复"
 fi
