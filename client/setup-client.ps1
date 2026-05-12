@@ -170,9 +170,9 @@ Start-Sleep 1
 if ($_physGW) {
     # 重新运行前清理上次写入的旁路路由，防止管理 IP 变化时旧持久路由积累无法清理
     # （仅删除已写入的路由条目，不触碰路由表中其他条目；route delete 在路由不存在时返回非零，属正常情况）
-    $_prevStateFile = "$WG_CONF_DIR\rdp-bypass-routes.txt"
-    if (Test-Path $_prevStateFile) {
-        @(Get-Content $_prevStateFile -ErrorAction SilentlyContinue |
+    $_stateFile = "$WG_CONF_DIR\rdp-bypass-routes.txt"
+    if (Test-Path $_stateFile) {
+        @(Get-Content $_stateFile -ErrorAction SilentlyContinue |
           Where-Object { $_ -match '\S' }) | ForEach-Object {
             $null = & route delete "$_" mask 255.255.255.0 2>&1
         }
