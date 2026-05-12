@@ -55,10 +55,12 @@ foreach ($_adp in (Get-NetAdapter | Where-Object {
 $_rdpMgmtNets = @(
     (Get-NetTCPConnection -LocalPort 3389 -ErrorAction SilentlyContinue |
      Where-Object {
-         $_.RemoteAddress -ne "0.0.0.0" -and $_.RemoteAddress -ne "127.0.0.1" -and
-         [System.Net.IPAddress]::TryParse($_.RemoteAddress, [ref]$null) -and
-         ([System.Net.IPAddress]::Parse($_.RemoteAddress).AddressFamily -eq
-          [System.Net.Sockets.AddressFamily]::InterNetwork)
+         # 使用局部变量一次解析，避免重复调用 Parse；TryParse 结果存入 $_parsed
+         $addr = $_.RemoteAddress
+         $_parsed = $null
+         $addr -ne "0.0.0.0" -and $addr -ne "127.0.0.1" -and
+         [System.Net.IPAddress]::TryParse($addr, [ref]$_parsed) -and
+         $_parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
      } |
      Select-Object -ExpandProperty RemoteAddress -Unique) |
     ForEach-Object { ($_ -replace '\.\d{1,3}$', '.0') }   # /24 网络地址
@@ -66,6 +68,15 @@ $_rdpMgmtNets = @(
 
 # ── 卸载模式 ──────────────────────────────────────────────────────────────────
 if ($Uninstall) {
+    # 先读取安装时保存的旁路路由记录（必须在停止服务前读取，防止目录被清理）
+    # Test-Path 在目录不存在时返回 $false，无需额外处理
+    $_stateFile = "$WG_CONF_DIR\rdp-bypass-routes.txt"
+    $_savedNets = @()
+    if (Test-Path $_stateFile) {
+        $_savedNets = @(Get-Content $_stateFile -ErrorAction SilentlyContinue |
+                        Where-Object { $_ -match '\S' })
+    }
+
     Write-Info "停止并移除 WireGuard 隧道..."
     if (Test-Path $WG_EXE) {
         & $WG_EXE /uninstalltunnelservice $WG_TUNNEL_NAME 2>$null
@@ -75,11 +86,12 @@ if ($Uninstall) {
     # 移除 Kill Switch 防火墙规则
     Remove-NetFirewallRule -Name "WG-KS-*" -ErrorAction SilentlyContinue | Out-Null
     Write-Info "Kill Switch 规则已清除。"
-    # 移除本次检测到的 RDP 管理直通路由（仅删除本脚本启动时检测并写入的 /24 持久路由）
-    if ($_physGW -and $_rdpMgmtNets.Count -gt 0) {
-        foreach ($_net in $_rdpMgmtNets) {
-            $null = & route delete "$_net" mask 255.255.255.0 $_physGW 2>&1
+    # 移除安装时写入的 RDP 管理直通路由（从状态文件读取，与安装时完全一致）
+    if ($_savedNets.Count -gt 0) {
+        foreach ($_net in $_savedNets) {
+            $null = & route delete "$_net" mask 255.255.255.0 2>&1
         }
+        Remove-Item $_stateFile -Force -ErrorAction SilentlyContinue
         Write-Info "RDP 直通路由已清除。"
     }
     Write-Info "卸载完成。"
@@ -158,10 +170,14 @@ Start-Sleep 1
 if ($_physGW) {
     if ($_rdpMgmtNets.Count -gt 0) {
         Write-Info "写入 RDP 管理网段直通路由（物理网关：$_physGW）..."
+        $_writtenNets = @()
         foreach ($_net in $_rdpMgmtNets) {
+            # 先删除同条路由（幂等）。route delete 在路由不存在时返回非零，属正常情况，静默丢弃
+            $null = & route delete "$_net" mask 255.255.255.0 2>&1
             $_routeOut = & route add "$_net" mask 255.255.255.0 $_physGW metric 1 -p 2>&1
             if ($LASTEXITCODE -eq 0) {
                 Write-Info "  ✓ $_net/24 → $_physGW（已持久化，重启后有效）"
+                $_writtenNets += $_net
             } else {
                 Write-Warn "  持久化失败（$_net）：$_routeOut"
                 Write-Warn "  尝试写入临时路由..."
@@ -173,13 +189,20 @@ if ($_physGW) {
                     Write-Warn "  临时路由也写入失败：$_tmpErr — RDP 响应包可能仍经隧道转发，请检查权限。"
                 } else {
                     Write-Warn "  ✓ 临时路由已写入（重启后失效，请排查持久化问题后重新运行脚本）"
+                    $_writtenNets += $_net
                 }
             }
+        }
+        # 保存已写入的旁路路由到状态文件，供 -Uninstall 精确清理使用
+        # $WG_CONF_DIR 已在步骤 2 由 New-Item -Force 创建，此处直接写入
+        if ($_writtenNets.Count -gt 0) {
+            $_writtenNets | Out-File "$WG_CONF_DIR\rdp-bypass-routes.txt" -Encoding ASCII -Force -ErrorAction SilentlyContinue
         }
     } else {
         Write-Warn @"
 未检测到活动 RDP 连接。VPN 启动后如需从新 IP 远程桌面，请在确认管理 IP 后
-以管理员 PowerShell 运行（将 1.2.3.0 替换为管理机 IP 所属 /24 网段地址）：
+以管理员 PowerShell 运行（将 1.2.3.0 替换为管理机 IP 所属 /24 网段地址；
+若路由已存在可先运行 route delete 1.2.3.0 mask 255.255.255.0 再添加）：
   route add 1.2.3.0 mask 255.255.255.0 $_physGW metric 1 -p
 "@
     }
