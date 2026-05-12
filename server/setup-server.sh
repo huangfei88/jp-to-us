@@ -370,7 +370,10 @@ if command -v ufw &>/dev/null; then
     # "OpenSSH" UFW 应用配置文件仅在 openssh-server 通过 apt 安装且注册了 UFW profile 时存在；
     # 若 profile 不存在，ufw allow OpenSSH 返回非零，触发 set -euo pipefail 中止脚本（防火墙半配）。
     # 回退到端口号写法确保 SSH 始终被放行，不依赖 profile 存在与否。
-    ufw allow OpenSSH > /dev/null || ufw allow 22/tcp > /dev/null || true
+    # 若两条命令均失败（权限异常或 UFW 内部错误），发出警告并继续（SSH 规则可能未生效）。
+    if ! { ufw allow OpenSSH > /dev/null 2>&1 || ufw allow 22/tcp > /dev/null 2>&1; }; then
+        warn "ufw allow OpenSSH 及 ufw allow 22/tcp 均失败——SSH 入站规则可能未写入，请手动执行 'ufw allow 22/tcp' 确认"
+    fi
     # DEFAULT_FORWARD_POLICY=ACCEPT 是 UFW 允许内核 FORWARD 链生效的前提（wg-quick PostUp 依赖此策略）
     # 使用通配替换而非仅匹配 "DROP"：若当前值为 "REJECT" 或行不存在，原 sed 静默失效，
     # UFW 的 ufw-after-forward 链 catchall DROP/REJECT 落在 wg-quick PostUp 追加的 FORWARD

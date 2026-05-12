@@ -209,6 +209,8 @@ if ($_physGW) {
         }
         # 保存已写入的旁路路由到状态文件，供 -Uninstall 精确清理使用
         # $WG_CONF_DIR 已在步骤 2 由 New-Item -Force 创建，此处直接写入
+        # 若 $_writtenNets 为空（所有写入均失败），故意不创建状态文件：
+        # -Uninstall 在 $_savedNets.Count -eq 0 时直接跳过路由清理，不产生误操作。
         if ($_writtenNets.Count -gt 0) {
             $_writtenNets | Out-File $_stateFile -Encoding ASCII -Force -ErrorAction SilentlyContinue
         }
