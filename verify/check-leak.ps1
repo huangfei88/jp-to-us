@@ -82,7 +82,7 @@ $allDns = @(Get-NetAdapter | Where-Object {
 } | ForEach-Object {
     Get-DnsClientServerAddress -InterfaceAlias $_.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty ServerAddresses
-} | Where-Object { $_ } | Sort-Object -Unique)
+} | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
 $expectedDns = @("1.1.1.1", "1.0.0.1")
 $dnsBad = $allDns | Where-Object { $_ -notin $expectedDns -and $_ -notlike $VPN_SUBNET_PREFIX }
 if ($dnsBad) {
