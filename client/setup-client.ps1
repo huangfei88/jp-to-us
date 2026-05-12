@@ -269,7 +269,16 @@ New-NetFirewallRule -Name "WG-KS-AllowNTP" `
     -Protocol UDP -RemotePort 123 `
     -Profile Any -Enabled True | Out-Null
 
-Write-Info "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断；DHCP/NTP/链路本地已豁免）"
+# 允许 RDP 远程管理（防止 Kill Switch 阻断远程桌面响应流量，导致管理会话断开）
+# RDP 服务在 TCP 3389 侦听；出站方向的 LocalPort 3389 = 服务端向 RDP 客户端发回的响应包
+# 若不添加此规则，WG-KS-BlockOut 会阻断所有出站流量，包括 RDP 响应包，导致连接立即断开
+New-NetFirewallRule -Name "WG-KS-AllowRDP" `
+    -DisplayName "WireGuard KS: Allow RDP Remote Management" `
+    -Direction Outbound -Action Allow `
+    -Protocol TCP -LocalPort 3389 `
+    -Profile Any -Enabled True | Out-Null
+
+Write-Info "Kill Switch 已启用 ✓ （VPN 断线时所有出站流量将被自动阻断；DHCP/NTP/RDP/链路本地已豁免）"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 5. 验证连接
