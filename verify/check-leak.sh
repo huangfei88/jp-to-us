@@ -506,6 +506,45 @@ else
     fail "UDP 最小缓冲区不足（udp_rmem_min=${UDP_RMEM} udp_wmem_min=${UDP_WMEM}，期望 ≥ ${MIN_UDP_SOCKET_BUFFER}）——默认 4096 字节在系统内存压力下会导致 WireGuard UDP 套接字丢包（ENOBUFS），隧道单向断流；请重新运行 setup-server.sh 修复"
 fi
 
+# ── 17g. 连接队列深度（somaxconn / tcp_max_syn_backlog）───────────────────────
+# net.core.somaxconn：accept() 全连接队列上限。默认 128（Debian 内核默认值）；
+# 高并发场景（多客户端同时建立 TCP 管理连接）下队列满时新连接被内核静默丢弃。
+# net.ipv4.tcp_max_syn_backlog：SYN 半开连接队列上限。与 somaxconn 配套设置，
+# 二者不匹配时较小的一方成为瓶颈，产生随机 "Connection refused"。
+info "检查连接队列深度（somaxconn / tcp_max_syn_backlog）..."
+SOMAXCONN=$(sysctl -n net.core.somaxconn 2>/dev/null || echo 0)
+SYN_BACKLOG=$(sysctl -n net.ipv4.tcp_max_syn_backlog 2>/dev/null || echo 0)
+if [[ "$SOMAXCONN" -ge 65535 ]]; then
+    pass "somaxconn 已调优（${SOMAXCONN}，高并发 accept 队列充足，不会因队列满静默丢弃连接）"
+elif [[ "$SOMAXCONN" -gt 0 ]]; then
+    fail "somaxconn 过低（当前 ${SOMAXCONN}，建议 ≥ 65535）——高并发时 accept 队列满，新连接被内核静默丢弃；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 somaxconn"
+fi
+if [[ "$SYN_BACKLOG" -ge 65535 ]]; then
+    pass "tcp_max_syn_backlog 已调优（${SYN_BACKLOG}，SYN 半开连接队列充足，多客户端并发握手不丢包）"
+elif [[ "$SYN_BACKLOG" -gt 0 ]]; then
+    fail "tcp_max_syn_backlog 过低（当前 ${SYN_BACKLOG}，建议 ≥ 65535）——SYN 队列满时新握手被丢弃，影响多客户端并发连接；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 tcp_max_syn_backlog"
+fi
+
+# ── 17h. 套接字选项内存上限（optmem_max）──────────────────────────────────────
+# net.core.optmem_max：每套接字辅助数据（ancillary data / cmsg）内存上限。
+# 默认 20480 字节（20 KB）——在 64 MB rmem_max/wmem_max 场景下，
+# IP_PKTINFO、SO_TIMESTAMPING 等需要分配辅助数据的套接字选项因该上限被截断，
+# 导致精确延迟测量（latency attribution）和路径信息获取失败。
+# 524288 字节（512 KB）与 64 MB 大缓冲区配套使用。
+info "检查套接字选项内存上限（optmem_max）..."
+OPTMEM=$(sysctl -n net.core.optmem_max 2>/dev/null || echo 0)
+if [[ "$OPTMEM" -ge 524288 ]]; then
+    pass "optmem_max 已调优（${OPTMEM} 字节，与 64 MB 套接字缓冲区配套，辅助数据（cmsg）分配不受限）"
+elif [[ "$OPTMEM" -gt 0 ]]; then
+    fail "optmem_max 过低（当前 ${OPTMEM} 字节，建议 ≥ 524288）——64 MB 大缓冲区场景下辅助数据（IP_PKTINFO/SO_TIMESTAMPING）因内存上限被截断，影响延迟测量精度；请重新运行 setup-server.sh 修复"
+else
+    warn "无法读取 optmem_max"
+fi
+
 # ── 18. 内核模块开机自动加载持久化（企业级稳定性：重启后 sysctl 参数必须仍然生效）────────
 # systemd-sysctl.service 的 unit 文件中有 After=systemd-modules-load.service，
 # 确保 sysctl 在模块加载完成后才运行，所以只要模块在 /etc/modules-load.d/ 中配置，重启后参数即可生效

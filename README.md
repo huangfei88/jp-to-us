@@ -100,7 +100,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 
 **Linux 服务端验证：**
 ```bash
-bash verify/check-leak.sh
+sudo bash verify/check-leak.sh
 ```
 
 **Windows 客户端验证：**
