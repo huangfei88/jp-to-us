@@ -55,7 +55,7 @@ foreach ($_adp in (Get-NetAdapter | Where-Object {
 $_rdpMgmtNets = @(
     (Get-NetTCPConnection -LocalPort 3389 -ErrorAction SilentlyContinue |
      Where-Object {
-         # 使用局部变量一次解析，避免重复调用 Parse；TryParse 结果存入 $_parsed
+         # 使用局部变量一次解析，避免重复调用 TryParse；解析结果存入 $_parsed
          $addr = $_.RemoteAddress
          $_parsed = $null
          $addr -ne "0.0.0.0" -and $addr -ne "127.0.0.1" -and
