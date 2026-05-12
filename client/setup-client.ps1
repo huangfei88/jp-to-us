@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     WireGuard 全流量 VPN 客户端安装脚本 — Osaka Windows Server 2022 Datacenter
     将 Windows 所有网络流量路由通过圣何塞 Linux 服务器出口
