@@ -261,7 +261,12 @@ else
         /etc/sysctl.d/99-vpn-perf.conf
     sed -i 's/net.core.default_qdisc = fq$/net.core.default_qdisc = fq_codel/' \
         /etc/sysctl.d/99-vpn-perf.conf
-    sysctl -p /etc/sysctl.d/99-vpn-perf.conf > /dev/null
+    # 仅对两个被修改的参数做定向写入（避免重新 sysctl -p 整个文件）：
+    # sysctl -p 会对 IPv6 send_redirects 路径做 stat() 检查，若路径在此内核上不可 stat()
+    # （部分 VPS 内核的 procfs 行为），sysctl -p 退出非零并触发 set -e 中断脚本。
+    # 持久化（重启后生效）已由上方 sed 完成；此处仅更新当前会话运行时值。
+    sysctl -w net.ipv4.tcp_congestion_control=cubic   > /dev/null 2>&1 || true
+    sysctl -w net.core.default_qdisc=fq_codel         > /dev/null 2>&1 || true
 fi
 
 # ── 3. 生成密钥对 ──────────────────────────────────────────────────────────────
