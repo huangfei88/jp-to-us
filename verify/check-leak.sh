@@ -132,7 +132,8 @@ fi
 #   - pfifo_fast（Linux 默认）是一个三级优先级队列，所有流共用，无 pacing 能力
 #     → BBR 写入 cwnd 但无法控制间隔，大量包堆积在网卡队列，延迟毛刺显著增大
 #   - fq_codel 是 fq + CoDel 的组合，是 cubic 的推荐配套 qdisc
-# 任何含 fq 语义的 qdisc（fq、fq_codel、cake）均可接受；pfifo*/bfifo 导致缓冲区膨胀
+# Debian 主线内核上可用的三种 FQ 调度器（穷举）：fq / fq_codel / cake。
+# sfq 等其他调度器不提供防缓冲区膨胀（CoDel/FQ pacing）能力，不在接受列表中。
 info "检查网络队列调度器（default_qdisc）..."
 QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
 if [[ "$QDISC" == "fq" || "$QDISC" == "fq_codel" || "$QDISC" == "cake" ]]; then
@@ -343,7 +344,7 @@ if [[ "$CT_MAX" -gt 0 ]]; then
     EXPECTED_HASH=$(( CT_MAX / 4 ))
     EXPECTED_HASH_DESC="nf_conntrack_max/4=${EXPECTED_HASH}"
 else
-    EXPECTED_HASH="$FALLBACK_CONNTRACK_HASHSIZE"
+    EXPECTED_HASH=$(( FALLBACK_CONNTRACK_HASHSIZE + 0 ))
     EXPECTED_HASH_DESC="${FALLBACK_CONNTRACK_HASHSIZE}（nf_conntrack_max 不可读，使用回退期望值）"
 fi
 if [[ "$CT_HASH" -ge "$EXPECTED_HASH" ]]; then
