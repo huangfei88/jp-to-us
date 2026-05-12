@@ -18,7 +18,7 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
 # ── 配置变量（按需修改）────────────────────────────────────────────────────────
 WG_IFACE="wg0"
-WG_PORT=51820  # 默认 51820；必须与 check-leak.sh 中的 WG_PORT 保持一致；check-leak.sh 用此值验证 UFW 开放了正确端口
+WG_PORT=51820                       # WireGuard 监听端口（默认 51820）
 WG_SUBNET_V4="10.10.0.0/24"        # 隧道 IPv4 子网
 WG_SERVER_V4="10.10.0.1"           # 服务端隧道 IP
 WG_CLIENT_V4="10.10.0.2"           # 客户端隧道 IP

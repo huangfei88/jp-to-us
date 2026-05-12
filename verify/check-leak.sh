@@ -14,8 +14,13 @@ info() { echo -e "${CYAN}[INFO]${NC} $*"; }
 
 FAILED=0
 WG_IFACE="wg0"
-WG_PORT=51820  # 必须与 setup-server.sh 中的 WG_PORT 保持一致（默认 51820）；
-               # 此值用于验证 UFW 已开放正确端口（见下方步骤 19 的 UFW 检查）
+# WG_PORT：从实际运行的 wg0.conf 动态读取，消除与 setup-server.sh 的手动同步风险；
+# 若配置文件不存在（WireGuard 未安装），则沿用默认值 51820 使其他检测项仍可运行。
+WG_PORT=51820
+if [[ -f "/etc/wireguard/${WG_IFACE}.conf" ]]; then
+    _CFG_PORT=$(grep -m1 '^ListenPort' "/etc/wireguard/${WG_IFACE}.conf" 2>/dev/null | awk '{print $NF}')
+    [[ "$_CFG_PORT" =~ ^[0-9]+$ ]] && WG_PORT="$_CFG_PORT"
+fi
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
