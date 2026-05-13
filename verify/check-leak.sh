@@ -189,7 +189,7 @@ AR6DEF=$(sysctl -n net.ipv6.conf.default.accept_redirects 2>/dev/null || echo 1)
 # 注意：部分内核/容器环境不提供此 sysctl 路径；IPv6 转发（all.forwarding=1）启用时
 # 内核已隐式禁止发送 ICMPv6 重定向，此时路径不存在视为安全基线已满足（PASS）。
 # 若 IPv6 转发未启用且路径不存在，则标记为 WARN（状态不确定）。
-SR6_ALL=$(sysctl -n net.ipv6.conf.all.send_redirects 2>/dev/null)
+SR6_ALL=$(sysctl -n net.ipv6.conf.all.send_redirects 2>/dev/null || true)
 if [[ -z "$SR6_ALL" ]]; then
     if [[ "$FWD6" == "1" ]]; then
         pass "IPv6 all.send_redirects：sysctl 路径不存在，IPv6 转发已启用（all.forwarding=1）时内核隐式禁用，安全基线已满足"
@@ -205,7 +205,7 @@ else
         fail "IPv6 ICMP 重定向发送未禁用（当前值：${SR6_ALL}，期望值 0）——IPv6 转发未启用时内核不会隐式禁用，攻击者可通过 ICMPv6 重定向操纵路由表"
     fi
 fi
-SR6_DEF=$(sysctl -n net.ipv6.conf.default.send_redirects 2>/dev/null)
+SR6_DEF=$(sysctl -n net.ipv6.conf.default.send_redirects 2>/dev/null || true)
 if [[ -z "$SR6_DEF" ]]; then
     if [[ "$FWD6" == "1" ]]; then
         pass "IPv6 default.send_redirects：sysctl 路径不存在，IPv6 转发已启用（all.forwarding=1）时内核隐式禁用，安全基线已满足"
