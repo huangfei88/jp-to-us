@@ -523,7 +523,13 @@ Write-Host "  3. 访问 https://ipv6leak.com     — 确认无 IPv6 泄露"
 Write-Host "  4. 从管理机重新建立 RDP 连接测试是否正常"
 Write-Host ""
 Write-Host "管理命令：" -ForegroundColor Yellow
-Write-Host "  停止 VPN：Stop-Service  'WireGuardTunnel`$$WG_TUNNEL_NAME'"
+Write-Host "  停止 VPN：Stop-Service 'WireGuardTunnel`$$WG_TUNNEL_NAME'"
 Write-Host "  启动 VPN：Start-Service 'WireGuardTunnel`$$WG_TUNNEL_NAME'"
-Write-Host "  添加新管理 IP：route add 新IP所属/24网络地址 mask 255.255.255.0 $($_physGW ?? '物理网关IP') metric 1 -p"
+
+if ($_physGW) {
+    Write-Host "  添加新管理 IP：route add 新IP所属网段 mask 255.255.255.0 $_physGW metric 1 -p"
+} else {
+    Write-Host "  添加新管理 IP：route add 新IP所属网段 mask 255.255.255.0 <物理网关IP> metric 1 -p"
+}
+
 Write-Host "  卸载 VPN：.\setup-client.ps1 -Uninstall"
